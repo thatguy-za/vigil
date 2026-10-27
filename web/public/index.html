@@ -13,7 +13,21 @@
 <title>Vigil</title>
 </head>
 <body>
-<header><h1>Vigil</h1><span id="hdr"></span></header>
+<header>
+  <button id="menu" class="menu" aria-label="Open menu"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+  <h1>Vigil</h1>
+</header>
+<div id="drawer">
+  <div class="scrim"></div>
+  <aside>
+    <div class="dh"><b>Vigil</b><button type="button" class="x" aria-label="Close menu">×</button></div>
+    <a href="#/">Cameras</a>
+    <a href="#/camera">Add camera</a>
+    <a href="#/clips">Recordings</a>
+    <a href="#/system">System</a>
+    <div class="sub" id="dver" style="margin:auto 16px 0"></div>
+  </aside>
+</div>
 <main id="view"></main>
 <nav>
   <a href="#/" data-t="cams"><svg viewBox="0 0 24 24"><path d="M3 7h13v10H3zM16 10l5-3v10l-5-3"/></svg>Cameras</a>

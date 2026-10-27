@@ -13,7 +13,7 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /vigil /usr/local/bin/vigil
 COPY docker/entrypoint.sh /entrypoint.sh
-ENV PUID=1000 PGID=1000 VIGIL_CONFIG=/config VIGIL_RECORDINGS=/recordings VIGIL_PORT=8080 \
+ENV PUID=1000 PGID=1000 VIGIL_CONFIG=/config VIGIL_RECORDINGS=/recordings VIGIL_BUFFER=/tmp/vigil VIGIL_PORT=8080 \
     GOMEMLIMIT=160MiB GOGC=50
 VOLUME ["/config", "/recordings"]
 EXPOSE 8080

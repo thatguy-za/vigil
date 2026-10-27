@@ -34,19 +34,23 @@ type job struct {
 	running   bool
 	startedAt time.Time
 	lastErr   string
+	noHW      bool // hardware decode failed once; use software for motion analysis
+	motion    bool // an event is being recorded
 }
 
 type Manager struct {
-	db   *db.DB
-	dir  string
-	enc  hw.Encoder
-	mu   sync.Mutex
-	jobs map[int64]*job
-	kick chan struct{}
+	db    *db.DB
+	dir   string
+	buf   string // scratch dir for motion pre-roll segments
+	enc   hw.Encoder
+	hwDec bool
+	mu    sync.Mutex
+	jobs  map[int64]*job
+	kick  chan struct{}
 }
 
-func New(d *db.DB, recDir string, enc hw.Encoder) *Manager {
-	return &Manager{db: d, dir: recDir, enc: enc, jobs: map[int64]*job{}, kick: make(chan struct{}, 1)}
+func New(d *db.DB, recDir, bufDir string, enc hw.Encoder, hwDecode bool) *Manager {
+	return &Manager{db: d, dir: recDir, buf: bufDir, enc: enc, hwDec: hwDecode, jobs: map[int64]*job{}, kick: make(chan struct{}, 1)}
 }
 
 func CameraDir(root string, id int64) string { return filepath.Join(root, fmt.Sprintf("cam%d", id)) }
@@ -76,7 +80,7 @@ func (m *Manager) Run(ctx context.Context) {
 
 func wanted(c db.Camera, now time.Time) bool {
 	switch c.Mode {
-	case "continuous":
+	case "continuous", "motion":
 		return true
 	case "schedule":
 		i := int(now.Weekday())*24 + now.Hour()
@@ -94,7 +98,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 	now := time.Now()
 	keep := map[int64]bool{}
 	for _, c := range cams {
-		sig := strings.Join(m.args(c), "\x00")
+		sig := strings.Join(m.args(c), "\x00") + fmt.Sprint(c.MotionSensitivity) + c.MotionMask
 		m.mu.Lock()
 		j := m.jobs[c.ID]
 		m.mu.Unlock()
@@ -168,14 +172,13 @@ func (m *Manager) Status(c db.Camera) Status {
 	j := m.jobs[c.ID]
 	m.mu.Unlock()
 	if j == nil {
-		if c.Mode == "motion" {
-			return Status{State: "idle", Error: "Motion detection is not available yet"}
-		}
 		return Status{State: "idle"}
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	switch {
+	case j.running && time.Since(j.startedAt) > 5*time.Second && c.Mode == "motion" && !j.motion:
+		return Status{State: "watching"}
 	case j.running && time.Since(j.startedAt) > 5*time.Second:
 		return Status{State: "recording"}
 	case j.running:
@@ -189,16 +192,21 @@ func (m *Manager) loop(ctx context.Context, c db.Camera, j *job) {
 	backoff := 3 * time.Second
 	for ctx.Err() == nil {
 		os.MkdirAll(CameraDir(m.dir, c.ID), 0o755)
-		cmd := exec.CommandContext(ctx, "ffmpeg", m.args(c)...)
-		cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
-		cmd.WaitDelay = 8 * time.Second
 		var tail tailBuf
-		cmd.Stderr = &tail
 		j.mu.Lock()
 		j.running, j.startedAt = true, time.Now()
 		j.mu.Unlock()
 		start := time.Now()
-		err := cmd.Run()
+		var err error
+		if c.Mode == "motion" {
+			err = m.runMotion(ctx, c, j, &tail)
+		} else {
+			cmd := exec.CommandContext(ctx, "ffmpeg", m.args(c)...)
+			cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
+			cmd.WaitDelay = 8 * time.Second
+			cmd.Stderr = &tail
+			err = cmd.Run()
+		}
 		j.mu.Lock()
 		j.running = false
 		if ctx.Err() == nil {
@@ -228,8 +236,22 @@ func (m *Manager) loop(ctx context.Context, c db.Camera, j *job) {
 // args builds the ffmpeg command line. Copy mode remuxes the camera stream
 // untouched; transcode mode re-encodes with the best encoder found at startup.
 func (m *Manager) args(c db.Camera) []string {
+	if c.Mode == "motion" {
+		return m.motionArgs(c, m.hwDec)
+	}
 	a := []string{"-hide_banner", "-loglevel", "warning", "-nostdin",
 		"-rtsp_transport", "tcp", "-i", c.URL, "-map", "0:v:0"}
+	a = append(a, m.codecArgs(c)...)
+	return append(a, "-f", "segment", "-segment_time", fmt.Sprint(SegmentSeconds),
+		"-segment_atclocktime", "1", "-reset_timestamps", "1", "-strftime", "1",
+		"-segment_format", "mp4",
+		"-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof",
+		filepath.Join(CameraDir(m.dir, c.ID), "%Y-%m-%d_%H-%M-%S.mp4"))
+}
+
+// codecArgs are the audio/video encoding options shared by both recording modes.
+func (m *Manager) codecArgs(c db.Camera) []string {
+	var a []string
 	if c.Audio {
 		a = append(a, "-map", "0:a:0?", "-c:a", "aac", "-b:a", "64k")
 	} else {
@@ -250,11 +272,7 @@ func (m *Manager) args(c db.Camera) []string {
 	} else {
 		a = append(a, "-c:v", "copy")
 	}
-	return append(a, "-f", "segment", "-segment_time", fmt.Sprint(SegmentSeconds),
-		"-segment_atclocktime", "1", "-reset_timestamps", "1", "-strftime", "1",
-		"-segment_format", "mp4",
-		"-segment_format_options", "movflags=+frag_keyframe+empty_moov+default_base_moof",
-		filepath.Join(CameraDir(m.dir, c.ID), "%Y-%m-%d_%H-%M-%S.mp4"))
+	return a
 }
 
 var credRe = regexp.MustCompile(`://[^/@\s]*@`)

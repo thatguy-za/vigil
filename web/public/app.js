@@ -16,27 +16,68 @@ async function api(path, opts = {}) {
 }
 
 function toast(msg) {
-  const t = Object.assign(document.createElement('div'), { className: 'toast', textContent: msg });
-  document.body.append(t); setTimeout(() => t.remove(), 3500);
+  const t = Object.assign(document.createElement('div'), { className: 'toast' });
+  t.innerHTML = `<span>${esc(msg)}</span><button type="button" class="x" aria-label="Dismiss">×</button>`;
+  t.querySelector('.x').onclick = () => t.remove();
+  document.body.append(t); setTimeout(() => t.remove(), 5000);
 }
 
+// Modal sheet with an X. By default closing goes back to the home page.
+function closeSheets() { document.querySelectorAll('.sheet').forEach(e => e.remove()); document.body.classList.remove('noscroll'); }
+function sheet(title, html, onClose = () => { location.hash = '#/'; }) {
+  closeSheets();
+  const el = document.createElement('div'); el.className = 'sheet';
+  el.innerHTML = `<div class="panel" role="dialog" aria-label="${esc(title)}"><div class="ph"><h2>${esc(title)}</h2><button type="button" class="x" aria-label="Close">×</button></div><div class="pb">${html}</div></div>`;
+  el._close = onClose;
+  el.querySelector('.x').onclick = onClose;
+  el.onclick = e => { if (e.target === el) onClose(); };
+  document.body.append(el); document.body.classList.add('noscroll');
+  return el;
+}
+
+const drawer = $('#drawer');
+const closeDrawer = () => drawer.classList.remove('open');
+$('#menu').onclick = () => drawer.classList.add('open');
+drawer.querySelector('.scrim').onclick = closeDrawer;
+drawer.querySelector('.x').onclick = () => { closeDrawer(); location.hash = '#/'; };
+drawer.querySelectorAll('a').forEach(a => a.addEventListener('click', closeDrawer));
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const s = document.querySelector('.sheet');
+  s ? s._close() : closeDrawer();
+});
+api('/system').then(s => $('#dver').textContent = 'Vigil ' + s.version).catch(() => { });
+
 const MODES = { off: 'Off', continuous: '24x7', schedule: 'Schedule', motion: 'Motion' };
-const pill = s => `<span class="pill ${s.state}">${{ recording: 'Recording', connecting: 'Connecting', error: 'Error', off: 'Off', idle: 'Idle' }[s.state]}</span>`;
-const fmtBytes = b => b > 2 ** 30 ? (b / 2 ** 30).toFixed(1) + ' GB' : (b / 2 ** 20).toFixed(0) + ' MB';
+const pill = s => `<span class="pill ${s.state}">${{ recording: 'Recording', watching: 'Watching', connecting: 'Connecting', error: 'Error', off: 'Off', idle: 'Idle' }[s.state]}</span>`;
+const fmtBytes = b => b > 2 ** 30 ? (b / 2 ** 30).toFixed(1) + ' GB' : b > 2 ** 20 ? (b / 2 ** 20).toFixed(0) + ' MB' : Math.round(b / 1024) + ' KB';
 const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
 // ---------- Cameras ----------
 async function camerasView() {
-  const cams = await api('/cameras');
+  const [cams, found] = await Promise.all([api('/cameras'), api('/discovery').catch(() => [])]);
+  const fresh = found.filter(d => d.status === 'new');
+  const foundHtml = fresh.length ? `<div class="found card pad" id="homefound"><h2>New cameras found</h2>${fresh.map(d => `
+    <div class="fhome" data-d="${esc(d.id)}"><div><b>${esc(d.name)}</b><div class="sub">${esc(d.host)}</div></div>
+    <div class="fa"><button class="pri" data-add>Add</button><button data-dis>Dismiss</button></div></div>`).join('')}</div>` : '';
+  view.onclick = async e => {
+    const row = e.target.closest('.fhome'); if (!row) return;
+    if (e.target.dataset.add !== undefined) location.hash = '#/camera?d=' + encodeURIComponent(row.dataset.d);
+    if (e.target.dataset.dis !== undefined) {
+      try { await api(`/discovery/${row.dataset.d}/dismiss`, { method: 'POST' }); } catch (err) { return toast(err.message); }
+      row.remove();
+      if (!$('#homefound .fhome')) $('#homefound').remove();
+    }
+  };
   if (!cams.length) {
     const sys = await api('/system');
-    view.innerHTML = `<div class="empty"><h2>No cameras yet</h2>
-      <p>Add an RTSP camera to start recording.</p>
+    view.innerHTML = foundHtml + `<div class="empty"><h2>No cameras yet</h2>
+      <p>Add an RTSP or ONVIF camera to start recording.</p>
       <p class="sub">${esc(sys.hw.recommendation.summary)}</p>
       <a class="btn pri" href="#/camera">Add your first camera</a></div>`;
     return;
   }
-  view.innerHTML = `<div class="grid">${cams.map(c => `
+  view.innerHTML = foundHtml + `<div class="grid">${cams.map(c => `
     <a class="card cam" href="#/camera/${c.id}">
       <div class="thumb"><span>Loading preview…</span><img data-id="${c.id}" alt=""></div>
       <div class="row"><div><b>${esc(c.name)}</b><div class="sub">${MODES[c.mode]}${c.transcode ? ' · transcoded' : ''}</div></div>${pill(c.status)}</div>
@@ -67,15 +108,28 @@ async function updateStatus() {
 
 // ---------- Add / edit camera ----------
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+// Tap/drag painting for a grid of cells with data-i; arr holds '0'/'1' per index.
+function paintGrid(g, arr) {
+  let paint = null;
+  const cell = (x, y) => { const el = document.elementFromPoint(x, y); return el && g.contains(el) && el.dataset.i !== undefined ? el : null; };
+  const set = el => { if (el && paint !== null) { arr[el.dataset.i] = paint ? '1' : '0'; el.classList.toggle('on', paint); } };
+  g.onpointerdown = e => { const el = cell(e.clientX, e.clientY); if (el) { paint = arr[el.dataset.i] !== '1'; set(el); g.setPointerCapture(e.pointerId); } };
+  g.onpointermove = e => set(cell(e.clientX, e.clientY));
+  g.onpointerup = g.onpointercancel = () => paint = null;
+}
+const MASK_CELLS = 16 * 9;
 const dow = col => (col + 1) % 7; // grid columns start Monday, schedule index starts Sunday
 
-async function cameraForm(id) {
+let linkedDiscovery = null; // discovered device the camera being added came from
+async function cameraForm(id, preselect) {
+  linkedDiscovery = null;
   const [sys, existing] = await Promise.all([api('/system'), id ? api('/cameras/' + id) : null]);
-  const c = existing || { name: '', url: '', sub_url: '', mode: 'continuous', schedule: '0'.repeat(168), transcode: false, max_height: 720, audio: false, retention_days: 0 };
+  const c = existing || { name: '', url: '', sub_url: '', mode: 'continuous', schedule: '0'.repeat(168), transcode: false, max_height: 720, audio: false, retention_days: 0, motion_mask: '' };
   if (c.schedule.length !== 168) c.schedule = '0'.repeat(168);
   const enc = sys.hw.encoder;
-  view.innerHTML = `<h2>${id ? 'Edit camera' : 'Add camera'}</h2>
-  <form id="f" class="card pad" autocomplete="off">
+  sheet(id ? 'Edit camera' : 'Add camera', `
+  <form id="f" autocomplete="off">
+    ${id ? '' : '<div id="found"><div class="sub">Looking for cameras on your network…</div></div>'}
     <label for="name" style="margin-top:0">Name</label>
     <input id="name" type="text" value="${esc(c.name)}" placeholder="Front door" required>
     <label for="url">Stream URL <small>RTSP</small></label>
@@ -86,8 +140,16 @@ async function cameraForm(id) {
     <input id="sub" type="url" value="${esc(c.sub_url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream2" inputmode="url" autocapitalize="off">
     <label>Record</label>
     <div class="seg" id="mode">${['off', 'continuous', 'schedule', 'motion'].map(m =>
-      `<button type="button" data-m="${m}" class="${c.mode === m ? 'on' : ''}" ${m === 'motion' ? 'disabled title="Coming soon"' : ''}>${MODES[m]}${m === 'motion' ? ' (soon)' : ''}</button>`).join('')}</div>
+      `<button type="button" data-m="${m}" class="${c.mode === m ? 'on' : ''}" >${MODES[m]}</button>`).join('')}</div>
     <div id="sched" hidden></div>
+    <div id="motion" hidden>
+      <label for="sens">Motion sensitivity <small>higher catches smaller movement</small></label>
+      <input id="sens" type="range" min="1" max="10" value="${c.motion_sensitivity || 5}" style="width:100%">
+      <label>Ignore areas <small>paint over trees, timestamps or busy roads</small></label>
+      <div class="maskbox"><img id="maskimg" alt=""><div class="mask" id="mask">${Array.from({ length: MASK_CELLS }, (_, i) => `<div data-i="${i}"></div>`).join('')}</div></div>
+      <div class="actions" style="margin-top:8px"><button type="button" id="maskclr">Clear</button></div>
+      <div class="sub" style="margin-top:8px">${sys.hw.hw_decode ? 'GPU decoding will be used to analyse the video.' : 'The video is analysed on the CPU.'} Adding a low-resolution sub-stream above makes this much lighter. Clips include 5 s before and 10 s after the movement.</div>
+    </div>
     <div class="sw"><span>Record audio<small>Converted to AAC</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
     <div class="sw"><span>Transcode video<small>${enc.hardware ? `GPU encoder (${esc(enc.name)}) available` : `CPU only (${esc(enc.name)}): heavy on this board`}. Leave off unless playback fails.</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
     <div id="tcopt" hidden><label for="mh">Max height</label>
@@ -96,11 +158,17 @@ async function cameraForm(id) {
     <input id="ret" type="number" min="0" max="3650" value="${c.retention_days}" inputmode="numeric">
     <div id="err" class="err"></div>
     <div class="actions"><button class="pri" id="save">Save</button>${id ? '<button type="button" class="del" id="del">Delete</button>' : ''}</div>
-  </form>`;
+  </form>`);
 
   let mode = c.mode, sched = c.schedule.split('');
+  const mask = (c.motion_mask?.length === MASK_CELLS ? c.motion_mask : '0'.repeat(MASK_CELLS)).split('');
+  const drawMask = () => $('#mask').childNodes.forEach((el, i) => el.classList.toggle('on', mask[i] === '1'));
+  drawMask(); paintGrid($('#mask'), mask);
+  $('#maskclr').onclick = () => { mask.fill('0'); drawMask(); };
+  if (id) $('#maskimg').src = `/api/cameras/${id}/snapshot?t=${Date.now()}`;
   const upd = () => {
     $('#sched').hidden = mode !== 'schedule';
+    $('#motion').hidden = mode !== 'motion';
     $('#tcopt').hidden = !$('#tc').checked;
     document.querySelectorAll('#mode button').forEach(b => b.classList.toggle('on', b.dataset.m === mode));
   };
@@ -117,13 +185,7 @@ async function cameraForm(id) {
     <div class="sched" id="grid"><div class="h"></div>${DAYS.map(d => `<div class="h">${d}</div>`).join('')}
     ${Array.from({ length: 24 }, (_, h) => `<div class="h">${String(h).padStart(2, '0')}</div>` +
       DAYS.map((_, col) => `<div data-i="${dow(col) * 24 + h}" class="${sched[dow(col) * 24 + h] === '1' ? 'on' : ''}"></div>`).join('')).join('')}</div>`;
-    let paint = null;
-    const cell = (x, y) => { const el = document.elementFromPoint(x, y); return el?.dataset?.i ? el : null; };
-    const set = el => { if (el && paint !== null) { sched[el.dataset.i] = paint ? '1' : '0'; el.classList.toggle('on', paint); } };
-    const g = $('#grid');
-    g.onpointerdown = e => { const el = cell(e.clientX, e.clientY); if (el) { paint = sched[el.dataset.i] !== '1'; set(el); g.setPointerCapture(e.pointerId); } };
-    g.onpointermove = e => set(cell(e.clientX, e.clientY));
-    g.onpointerup = g.onpointercancel = () => paint = null;
+    paintGrid($('#grid'), sched);
     sc.querySelector('.chips').onclick = e => {
       const p = e.target.dataset?.p; if (!p) return;
       sched = sched.map((_, i) => { const h = i % 24; return p === 'all' ? '1' : p === 'night' ? (h >= 18 || h < 6 ? '1' : '0') : p === 'work' ? (h >= 8 && h < 18 ? '1' : '0') : '0'; });
@@ -131,6 +193,7 @@ async function cameraForm(id) {
     };
   };
   drawSched(); upd();
+  if (!id) foundSection(preselect);
 
   $('#test').onclick = async e => {
     const b = e.target, url = $('#url').value.trim();
@@ -138,7 +201,9 @@ async function cameraForm(id) {
     try {
       const r = await fetch('/api/cameras/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) });
       if (!r.ok) throw new Error((await r.json()).error || 'failed');
-      $('#prev').innerHTML = `<div class="preview"><img src="${URL.createObjectURL(await r.blob())}" alt="Camera preview"></div><div class="sub">Connected.</div>`;
+      const blobUrl = URL.createObjectURL(await r.blob());
+      $('#maskimg').src = blobUrl;
+      $('#prev').innerHTML = `<div class="preview"><img src="${blobUrl}" alt="Camera preview"></div><div class="sub">Connected.</div>`;
     } catch (err) { $('#prev').innerHTML = `<div class="err" style="margin-top:8px">${esc(err.message)}</div>`; }
     b.disabled = false; b.textContent = 'Test connection';
   };
@@ -147,39 +212,99 @@ async function cameraForm(id) {
     e.preventDefault();
     $('#save').disabled = true; $('#err').textContent = '';
     const body = { name: $('#name').value, url: $('#url').value, sub_url: $('#sub').value, mode, schedule: sched.join(''),
-      transcode: $('#tc').checked, max_height: +$('#mh').value, audio: $('#audio').checked, retention_days: +$('#ret').value || 0 };
-    try { await api(id ? '/cameras/' + id : '/cameras', { method: id ? 'PUT' : 'POST', body }); location.hash = '#/'; }
+      transcode: $('#tc').checked, max_height: +$('#mh').value, audio: $('#audio').checked, retention_days: +$('#ret').value || 0, motion_sensitivity: +$('#sens').value, motion_mask: mask.includes('1') ? mask.join('') : '' };
+    try { await api(id ? '/cameras/' + id : '/cameras' + (linkedDiscovery ? '?discovery=' + encodeURIComponent(linkedDiscovery) : ''), { method: id ? 'PUT' : 'POST', body }); location.hash = '#/'; }
     catch (err) { $('#err').textContent = err.message; $('#save').disabled = false; }
   };
-  if (id) $('#del').onclick = async () => {
-    if (!confirm('Delete this camera?')) return;
-    const purge = confirm('Also delete its recordings?\n\nOK = delete recordings, Cancel = keep the files.');
-    await api(`/cameras/${id}?purge=${purge ? 1 : 0}`, { method: 'DELETE' });
-    location.hash = '#/';
+  if (id) $('#del').onclick = () => {
+    sheet('Delete camera', `<p>Delete <b>${esc(c.name)}</b>?</p>
+      <div class="sw"><span>Also delete its recordings</span><input id="purge" type="checkbox"></div>
+      <div class="actions"><button class="pri bad" id="dgo">Delete camera</button></div>`);
+    $('#dgo').onclick = async () => {
+      await api(`/cameras/${id}?purge=${$('#purge').checked ? 1 : 0}`, { method: 'DELETE' });
+      location.hash = '#/';
+    };
   };
 }
 
+// "Found on your network": ONVIF cameras that are new or were dismissed earlier.
+async function foundSection(pre) {
+  const box = $('#found');
+  let items = [], sel = pre;
+  const draw = () => {
+    box.innerHTML = `<div class="found-h" style="margin-top:0"><b>Found on your network</b><button type="button" class="link" id="rescan">Scan again</button></div>` +
+      (items.length ? items.map(d => `<div class="fcam ${d.id === sel ? 'sel' : ''}">
+        <button type="button" class="fpick" data-d="${esc(d.id)}"><span><b>${esc(d.name)}</b> <span class="sub">${esc(d.host)}${d.status === 'dismissed' ? ' · dismissed' : ''}</span></span><span class="sub">${d.id === sel ? 'Selected' : 'Use'}</span></button>
+        ${d.id === sel ? `<div class="fcreds"><div class="sub">Enter the camera's login so Vigil can find its streams.</div>
+          <input id="fu" type="text" placeholder="Username" autocapitalize="off" autocomplete="off" value="admin">
+          <input id="fp" type="password" placeholder="Password" autocomplete="new-password">
+          <button type="button" class="pri" id="fgo" style="margin-top:10px;width:100%">Connect</button><div class="err" id="fe"></div></div>` : ''}</div>`).join('')
+        : '<div class="sub" style="margin:8px 0">No ONVIF cameras found. Enter a stream URL below instead.</div>');
+    if (sel) box.querySelector('.fcam.sel')?.scrollIntoView({ block: 'nearest' });
+  };
+  const name = () => items.find(d => d.id === sel)?.name;
+  box.onclick = async e => {
+    const t = e.target.closest('button'); if (!t) return;
+    if (t.id === 'rescan') {
+      t.disabled = true; t.textContent = 'Scanning…';
+      try { items = await api('/discovery/scan', { method: 'POST' }); } catch (err) { toast(err.message); }
+      draw();
+    } else if (t.classList.contains('fpick')) {
+      sel = t.dataset.d; if (!$('#name').value) $('#name').value = name() || ''; draw();
+    } else if (t.id === 'fgo') {
+      t.disabled = true; t.textContent = 'Connecting…'; $('#fe').textContent = '';
+      try {
+        const r = await api(`/discovery/${sel}/resolve`, { method: 'POST', body: { username: $('#fu').value, password: $('#fp').value } });
+        linkedDiscovery = sel;
+        $('#url').value = r.url; $('#sub').value = r.sub_url;
+        if (!$('#name').value) $('#name').value = r.name;
+        $('#fe').className = 'ok'; $('#fe').textContent = r.sub_url ? 'Found the main and sub streams.' : 'Found the stream.';
+        $('#test').click();
+      } catch (err) { $('#fe').className = 'err'; $('#fe').textContent = err.message; }
+      t.disabled = false; t.textContent = 'Connect';
+    }
+  };
+  try { items = await api('/discovery'); } catch { }
+  if (sel && !$('#name').value) $('#name').value = name() || '';
+  draw();
+}
+
 // ---------- Recordings ----------
+const fmtDur = s => s >= 90 ? Math.round(s / 60) + ' min' : Math.round(s) + ' s';
+const dayPct = t => { const d = new Date(t); return (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) / 864; };
+
 async function clipsView(camId, date) {
   const cams = await api('/cameras');
   if (!cams.length) { view.innerHTML = '<div class="empty">Add a camera first.</div>'; return; }
   const cam = cams.find(c => c.id == camId) || cams[0];
   const r = await api(`/cameras/${cam.id}/recordings` + (date ? `?date=${date}` : ''));
+  const evs = r.date ? await api(`/cameras/${cam.id}/events?date=${r.date}`) : [];
+  const evCount = c => evs.filter(e => e.clip === c.path).length;
   view.innerHTML = `<h2>Recordings</h2>
     <div class="chips">${cams.map(c => `<button class="${c.id === cam.id ? 'on' : ''}" data-c="${c.id}">${esc(c.name)}</button>`).join('')}</div>
     ${r.dates.length ? `<select id="date">${r.dates.map(d => `<option ${d === r.date ? 'selected' : ''}>${d}</option>`).join('')}</select>
-    <div id="player" style="margin-top:12px"></div>
-    <div>${r.clips.map((c, i) => `<button class="clip card" data-i="${i}"><span><b>${fmtTime(c.start)}</b> <span class="sub">5 min segment${c.live ? ' · recording now' : ''}</span></span><span class="sub">${fmtBytes(c.bytes)}</span></button>`).join('')}</div>`
+    <div class="tl">
+      ${r.clips.map((c, i) => `<i class="cv" data-i="${i}" style="left:${dayPct(c.start)}%;width:${Math.max(c.duration / 864, .3)}%"></i>`).join('')}
+      ${evs.map((e, i) => `<i class="ev" data-e="${i}" style="left:${dayPct(e.start)}%;width:${Math.max((new Date(e.end) - new Date(e.start)) / 864000, .5)}%"></i>`).join('')}
+    </div>
+    <div class="tlx"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+    <div class="sub" style="margin-top:6px"><span class="key cv"></span> recorded <span class="key ev"></span> motion</div>
+    ${evs.length ? `<h2 style="margin-top:16px">Motion events</h2><div>${[...evs].reverse().map(e => `<button class="clip card evrow" data-e="${evs.indexOf(e)}"><span><b>${fmtTime(e.start)}</b> <span class="sub">${fmtDur((new Date(e.end) - new Date(e.start)) / 1000 + 1)} of movement · ${e.peak.toFixed(1)}% of frame</span></span><span class="sub">${e.clip ? 'Play' : 'Deleted'}</span></button>`).join('')}</div>` : ''}
+    <h2 style="margin-top:16px">Clips</h2>
+    <div>${r.clips.map((c, i) => `<button class="clip card" data-i="${i}"><span><b>${fmtTime(c.start)}</b> <span class="sub">${fmtDur(c.duration)}${evCount(c) ? ' · motion' : ''}${c.live ? ' · recording now' : ''}</span></span><span class="sub">${fmtBytes(c.bytes)}</span></button>`).join('')}</div>`
       : '<div class="empty">No recordings yet.</div>'}`;
   view.querySelector('.chips').onclick = e => e.target.dataset.c && (location.hash = `#/clips/${e.target.dataset.c}`);
-  if (r.dates.length) {
-    $('#date').onchange = e => clipsView(cam.id, e.target.value);
-    view.onclick = e => {
-      const b = e.target.closest('.clip'); if (!b) return;
-      $('#player').innerHTML = `<video controls autoplay playsinline src="${esc(r.clips[b.dataset.i].path)}"></video>`;
-      $('#player').scrollIntoView({ behavior: 'smooth', block: 'center' });
-    };
-  }
+  if (!r.dates.length) return;
+  $('#date').onchange = e => clipsView(cam.id, e.target.value);
+  const play = path => {
+    if (!path) return toast('That clip has been deleted');
+    sheet('Playback', `<video controls autoplay playsinline src="${esc(path)}"></video>`, closeSheets);
+  };
+  view.onclick = e => {
+    const t = e.target.closest('[data-i],[data-e]'); if (!t) return;
+    if (t.dataset.e !== undefined) play(evs[t.dataset.e].clip);
+    else play(r.clips[t.dataset.i].path);
+  };
 }
 
 // ---------- System ----------
@@ -199,12 +324,14 @@ async function systemView() {
 
 // ---------- Router ----------
 async function route() {
-  timers.forEach(clearInterval); timers = []; view.onclick = null;
-  const [, a, b, c] = location.hash.split('/');
+  timers.forEach(clearInterval); timers = []; view.onclick = null; closeSheets(); closeDrawer();
+  const [path, query] = location.hash.slice(1).split('?');
+  const [, a, b] = path.split('/');
+  const q = new URLSearchParams(query || '');
   document.querySelectorAll('nav a').forEach(n => n.classList.toggle('on',
     n.dataset.t === (a === 'clips' ? 'clips' : a === 'system' ? 'system' : 'cams')));
   try {
-    if (a === 'camera') await cameraForm(b);
+    if (a === 'camera') { await camerasView(); await cameraForm(b, q.get('d')); }
     else if (a === 'clips') await clipsView(b);
     else if (a === 'system') await systemView();
     else await camerasView();

@@ -12,6 +12,7 @@ import (
 
 	"github.com/thatguy-za/vigil/internal/api"
 	"github.com/thatguy-za/vigil/internal/db"
+	"github.com/thatguy-za/vigil/internal/discover"
 	"github.com/thatguy-za/vigil/internal/hw"
 	"github.com/thatguy-za/vigil/internal/live"
 	"github.com/thatguy-za/vigil/internal/recorder"
@@ -28,8 +29,8 @@ func env(k, def string) string {
 }
 
 func main() {
-	cfgDir, recDir := env("VIGIL_CONFIG", "/config"), env("VIGIL_RECORDINGS", "/recordings")
-	for _, d := range []string{cfgDir, recDir} {
+	cfgDir, recDir, bufDir := env("VIGIL_CONFIG", "/config"), env("VIGIL_RECORDINGS", "/recordings"), env("VIGIL_BUFFER", "/tmp/vigil")
+	for _, d := range []string{cfgDir, recDir, bufDir} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			log.Fatal(err)
 		}
@@ -44,12 +45,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	rec := recorder.New(d, recDir, info.Encoder)
+	rec := recorder.New(d, recDir, bufDir, info.Encoder, info.HWDecode)
 	go rec.Run(ctx)
 	go storage.Run(ctx, d, recDir)
+	scanner := &discover.Scanner{DB: d}
+	go scanner.Run(ctx)
 
 	srv := &http.Server{Addr: ":" + env("VIGIL_PORT", "8080"), ReadHeaderTimeout: 10 * time.Second,
-		Handler: (&api.Server{DB: d, Rec: rec, Live: live.New(ctx), HW: info, RecDir: recDir, Version: version}).Handler()}
+		Handler: (&api.Server{DB: d, Rec: rec, Live: live.New(ctx), Scan: scanner, HW: info, RecDir: recDir, Version: version}).Handler()}
 	go func() {
 		<-ctx.Done()
 		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)

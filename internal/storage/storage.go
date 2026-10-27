@@ -63,6 +63,7 @@ func sweep(d *db.DB, dir string) {
 			days = defDays
 		}
 		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+		d.DeleteEventsBefore(c.ID, cutoff)
 		filepath.WalkDir(recorder.CameraDir(dir, c.ID), func(p string, e fs.DirEntry, err error) error {
 			if err != nil || e.IsDir() || !strings.HasSuffix(p, ".mp4") {
 				return nil

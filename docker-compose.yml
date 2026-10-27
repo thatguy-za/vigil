@@ -8,6 +8,8 @@ services:
       - PUID=1000                 # run `id` on the Pi to find yours
       - PGID=1000
       - TZ=Europe/London
+    tmpfs:
+      - /tmp:size=128m            # short-lived buffer used for motion pre-roll
     volumes:
       - ./config:/config
       - /mnt/recordings:/recordings   # point this at your USB SSD
