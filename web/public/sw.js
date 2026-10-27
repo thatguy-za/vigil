@@ -1,5 +1,5 @@
 // App-shell cache; API and recordings always go to the network.
-const V = 'vigil-2', SHELL = ['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
+const V = 'vigil-3', SHELL = ['/', '/app.js', '/style.css', '/manifest.webmanifest', '/icon.svg'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(V).then(c => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', e => {
   e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== V).map(k => caches.delete(k)))));

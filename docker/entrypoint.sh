@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs Vigil as PUID:PGID, with access to the Pi's GPU video devices.
 set -e
-if [ "$(id -u)" != "0" ]; then exec vigil; fi
+if [ "$(id -u)" != "0" ]; then exec vigil "$@"; fi
 
 mkdir -p "$VIGIL_CONFIG" "$VIGIL_RECORDINGS"
 chown -R "$PUID:$PGID" "$VIGIL_CONFIG"
@@ -16,6 +16,6 @@ done
 groups="${groups#,}"
 
 if [ -n "$groups" ]; then
-  exec setpriv --reuid="$PUID" --regid="$PGID" --groups="$groups" vigil
+  exec setpriv --reuid="$PUID" --regid="$PGID" --groups="$groups" vigil "$@"
 fi
-exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups vigil
+exec setpriv --reuid="$PUID" --regid="$PGID" --clear-groups vigil "$@"

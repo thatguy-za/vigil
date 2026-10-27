@@ -23,10 +23,11 @@ h2{font-size:18px;margin:0 0 12px}
 .sub{color:var(--mut);font-size:13px}
 .err{color:var(--bad);font-size:13px;word-break:break-word}
 button,.btn{font:inherit;min-height:46px;padding:0 18px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg);cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
-button.pri{background:var(--acc);border-color:var(--acc);color:var(--accfg);font-weight:600}
+button.pri,.btn.pri{background:var(--acc);border-color:var(--acc);color:var(--accfg);font-weight:600}
 button.del{color:var(--bad)}
 button:disabled{opacity:.5}
-.fab{position:fixed;right:16px;bottom:calc(80px + env(safe-area-inset-bottom));width:56px;height:56px;border-radius:50%;padding:0;font-size:30px;box-shadow:0 6px 18px #0004;z-index:4}
+.fab{position:fixed;right:16px;bottom:calc(80px + env(safe-area-inset-bottom));height:52px;border-radius:26px;padding:0 20px;font-size:16px;font-weight:600;box-shadow:0 6px 18px #0004;z-index:4}
+.grid{margin-bottom:72px}
 label{display:block;font-size:14px;font-weight:600;margin:16px 0 6px}
 label small{font-weight:400;color:var(--mut)}
 input[type=text],input[type=url],input[type=number],input[type=password],select{width:100%;min-height:46px;padding:0 12px;font:inherit;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
@@ -91,3 +92,8 @@ button.pri.bad{background:var(--bad);border-color:var(--bad)}
 .fpick{display:flex;width:100%;justify-content:space-between;gap:8px;border:0;border-radius:0;background:none;text-align:left;min-height:52px}
 .fcreds{padding:0 12px 12px}.fcreds input{margin-top:8px}
 .ok{color:var(--ok);font-size:13px}
+
+body.auth header,body.auth nav{display:none}
+body.viewer [data-admin]{display:none!important}
+.authbox{max-width:380px;margin:10vh auto 0}
+.dlink{border:0;border-radius:0;background:none;text-align:left;justify-content:flex-start;padding:14px 16px;font-size:17px;color:var(--bad)}

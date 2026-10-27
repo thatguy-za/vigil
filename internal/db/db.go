@@ -52,6 +52,18 @@ CREATE TABLE IF NOT EXISTS events (
 	clip_dur REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS events_cam_start ON events(camera_id, start_ts);
+CREATE TABLE IF NOT EXISTS users (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+	pass_hash TEXT NOT NULL,
+	role TEXT NOT NULL, -- admin | viewer
+	created INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+	token_hash TEXT PRIMARY KEY,
+	user_id INTEGER NOT NULL,
+	expires INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS discovered (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,

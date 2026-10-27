@@ -53,17 +53,16 @@ func sweep(d *db.DB, dir string) {
 	if err != nil {
 		return
 	}
-	defDays := d.Int("default_retention_days", 14)
 	minFree := d.Int("min_free_pct", 5)
 	var all []file
 	removed := 0
 	for _, c := range cams {
+		// 0 days = no age limit; only the free-space floor below removes recordings
 		days := c.RetentionDays
-		if days <= 0 {
-			days = defDays
-		}
 		cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
-		d.DeleteEventsBefore(c.ID, cutoff)
+		if days > 0 {
+			d.DeleteEventsBefore(c.ID, cutoff)
+		}
 		filepath.WalkDir(recorder.CameraDir(dir, c.ID), func(p string, e fs.DirEntry, err error) error {
 			if err != nil || e.IsDir() || !strings.HasSuffix(p, ".mp4") {
 				return nil
@@ -72,7 +71,7 @@ func sweep(d *db.DB, dir string) {
 			if err != nil {
 				return nil
 			}
-			if info.ModTime().Before(cutoff) {
+			if days > 0 && info.ModTime().Before(cutoff) {
 				remove(p)
 				removed++
 			} else {

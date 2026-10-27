@@ -11,6 +11,7 @@ async function api(path, opts = {}) {
   });
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));
+  if (r.status === 401 && !path.startsWith('/auth/')) { boot(); throw new Error('Please sign in'); }
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
@@ -46,7 +47,7 @@ document.addEventListener('keydown', e => {
   const s = document.querySelector('.sheet');
   s ? s._close() : closeDrawer();
 });
-api('/system').then(s => $('#dver').textContent = 'Vigil ' + s.version).catch(() => { });
+$('#logout').onclick = () => { closeDrawer(); signOut(); };
 
 const MODES = { off: 'Off', continuous: '24x7', schedule: 'Schedule', motion: 'Motion' };
 const pill = s => `<span class="pill ${s.state}">${{ recording: 'Recording', watching: 'Watching', connecting: 'Connecting', error: 'Error', off: 'Off', idle: 'Idle' }[s.state]}</span>`;
@@ -55,7 +56,8 @@ const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: '2-digit', minut
 
 // ---------- Cameras ----------
 async function camerasView() {
-  const [cams, found] = await Promise.all([api('/cameras'), api('/discovery').catch(() => [])]);
+  const admin = me.role === 'admin';
+  const [cams, found] = await Promise.all([api('/cameras'), admin ? api('/discovery').catch(() => []) : []]);
   const fresh = found.filter(d => d.status === 'new');
   const foundHtml = fresh.length ? `<div class="found card pad" id="homefound"><h2>New cameras found</h2>${fresh.map(d => `
     <div class="fhome" data-d="${esc(d.id)}"><div><b>${esc(d.name)}</b><div class="sub">${esc(d.host)}</div></div>
@@ -70,6 +72,7 @@ async function camerasView() {
     }
   };
   if (!cams.length) {
+    if (!admin) { view.innerHTML = '<div class="empty"><h2>No cameras yet</h2><p>Ask an admin to add one.</p></div>'; return; }
     const sys = await api('/system');
     view.innerHTML = foundHtml + `<div class="empty"><h2>No cameras yet</h2>
       <p>Add an RTSP or ONVIF camera to start recording.</p>
@@ -78,12 +81,12 @@ async function camerasView() {
     return;
   }
   view.innerHTML = foundHtml + `<div class="grid">${cams.map(c => `
-    <a class="card cam" href="#/camera/${c.id}">
+    <a class="card cam" href="${admin ? '#/camera/' + c.id : '#/clips/' + c.id}">
       <div class="thumb"><span>Loading preview…</span><img data-id="${c.id}" alt=""></div>
       <div class="row"><div><b>${esc(c.name)}</b><div class="sub">${MODES[c.mode]}${c.transcode ? ' · transcoded' : ''}</div></div>${pill(c.status)}</div>
       ${c.status.state === 'error' ? `<div class="row err">${esc(c.status.error)}</div>` : ''}
     </a>`).join('')}</div>
-    <a class="btn pri fab" href="#/camera" aria-label="Add camera">+</a>`;
+    ${admin ? '<a class="btn pri fab" href="#/camera">+&nbsp; Add camera</a>' : ''}`;
   const imgs = [...view.querySelectorAll('img')];
   const refresh = () => imgs.forEach(img => {
     if (img.dataset.busy) return;
@@ -124,7 +127,7 @@ let linkedDiscovery = null; // discovered device the camera being added came fro
 async function cameraForm(id, preselect) {
   linkedDiscovery = null;
   const [sys, existing] = await Promise.all([api('/system'), id ? api('/cameras/' + id) : null]);
-  const c = existing || { name: '', url: '', sub_url: '', mode: 'continuous', schedule: '0'.repeat(168), transcode: false, max_height: 720, audio: false, retention_days: 0, motion_mask: '' };
+  const c = existing || { name: '', url: '', sub_url: '', mode: 'continuous', schedule: '0'.repeat(168), transcode: false, max_height: 720, audio: false, retention_days: 14, motion_mask: '' };
   if (c.schedule.length !== 168) c.schedule = '0'.repeat(168);
   const enc = sys.hw.encoder;
   sheet(id ? 'Edit camera' : 'Add camera', `
@@ -150,11 +153,11 @@ async function cameraForm(id, preselect) {
       <div class="actions" style="margin-top:8px"><button type="button" id="maskclr">Clear</button></div>
       <div class="sub" style="margin-top:8px">${sys.hw.hw_decode ? 'GPU decoding will be used to analyse the video.' : 'The video is analysed on the CPU.'} Adding a low-resolution sub-stream above makes this much lighter. Clips include 5 s before and 10 s after the movement.</div>
     </div>
-    <div class="sw"><span>Record audio<small>Converted to AAC</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
-    <div class="sw"><span>Transcode video<small>${enc.hardware ? `GPU encoder (${esc(enc.name)}) available` : `CPU only (${esc(enc.name)}): heavy on this board`}. Leave off unless playback fails.</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
+    <div class="sw"><span>Record audio<small>Saves the camera's microphone with each recording, converted to AAC so it plays in any browser. Leave off if you only need video.</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
+    <div class="sw"><span>Transcode video<small>Re-encodes video as H.264 at a smaller size so it plays in any browser and uses less storage. Normally the camera's stream is saved untouched, which costs almost no CPU. ${enc.hardware ? `Your GPU encoder (${esc(enc.name)}) will be used.` : `This board has no GPU encoder, so it would use the CPU (${esc(enc.name)}).`} Turn on only if playback fails or you need smaller files.</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
     <div id="tcopt" hidden><label for="mh">Max height</label>
       <select id="mh">${[480, 720, 1080].map(h => `<option ${c.max_height === h ? 'selected' : ''}>${h}</option>`).join('')}</select></div>
-    <label for="ret">Keep recordings for <small>days, 0 = default (14)</small></label>
+    <label for="ret">Keep recordings for <small>(Days. 0 = disabled)</small></label>
     <input id="ret" type="number" min="0" max="3650" value="${c.retention_days}" inputmode="numeric">
     <div id="err" class="err"></div>
     <div class="actions"><button class="pri" id="save">Save</button>${id ? '<button type="button" class="del" id="del">Delete</button>' : ''}</div>
@@ -232,7 +235,7 @@ async function foundSection(pre) {
   const box = $('#found');
   let items = [], sel = pre;
   const draw = () => {
-    box.innerHTML = `<div class="found-h" style="margin-top:0"><b>Found on your network</b><button type="button" class="link" id="rescan">Scan again</button></div>` +
+    box.innerHTML = `<div class="found-h" style="margin-top:0"><b>Found on your network</b></div>` +
       (items.length ? items.map(d => `<div class="fcam ${d.id === sel ? 'sel' : ''}">
         <button type="button" class="fpick" data-d="${esc(d.id)}"><span><b>${esc(d.name)}</b> <span class="sub">${esc(d.host)}${d.status === 'dismissed' ? ' · dismissed' : ''}</span></span><span class="sub">${d.id === sel ? 'Selected' : 'Use'}</span></button>
         ${d.id === sel ? `<div class="fcreds"><div class="sub">Enter the camera's login so Vigil can find its streams.</div>
@@ -245,11 +248,7 @@ async function foundSection(pre) {
   const name = () => items.find(d => d.id === sel)?.name;
   box.onclick = async e => {
     const t = e.target.closest('button'); if (!t) return;
-    if (t.id === 'rescan') {
-      t.disabled = true; t.textContent = 'Scanning…';
-      try { items = await api('/discovery/scan', { method: 'POST' }); } catch (err) { toast(err.message); }
-      draw();
-    } else if (t.classList.contains('fpick')) {
+    if (t.classList.contains('fpick')) {
       sel = t.dataset.d; if (!$('#name').value) $('#name').value = name() || ''; draw();
     } else if (t.id === 'fgo') {
       t.disabled = true; t.textContent = 'Connecting…'; $('#fe').textContent = '';
@@ -322,22 +321,152 @@ async function systemView() {
   <div class="card pad"><b>${esc(h.recommendation.summary)}</b><ul>${h.recommendation.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`;
 }
 
+// ---------- Sign in / setup ----------
+let me = null;
+
+function authView(kind) {
+  document.body.classList.add('auth'); closeSheets(); closeDrawer();
+  const setup = kind === 'setup';
+  view.innerHTML = `<div class="authbox card pad"><h2 style="margin-bottom:4px">${setup ? 'Welcome to Vigil' : 'Sign in'}</h2>
+    <div class="sub">${setup ? 'Create the admin account. You can add more users afterwards.' : 'Enter your username and password.'}</div>
+    <form id="af">
+      <label for="au">Username</label><input id="au" type="text" autocapitalize="off" autocomplete="username" required>
+      <label for="ap">Password${setup ? ' <small>at least 8 characters</small>' : ''}</label>
+      <input id="ap" type="password" autocomplete="${setup ? 'new-password' : 'current-password'}" required ${setup ? 'minlength="8"' : ''}>
+      ${setup ? '<label for="ap2">Confirm password</label><input id="ap2" type="password" autocomplete="new-password" required>' : ''}
+      <div class="err" id="ae"></div>
+      <div class="actions"><button class="pri" id="ago">${setup ? 'Create account' : 'Sign in'}</button></div>
+    </form></div>`;
+  $('#au').focus();
+  $('#af').onsubmit = async e => {
+    e.preventDefault();
+    if (setup && $('#ap').value !== $('#ap2').value) { $('#ae').textContent = 'Passwords do not match'; return; }
+    $('#ago').disabled = true; $('#ae').textContent = '';
+    try { await api(setup ? '/auth/setup' : '/auth/login', { method: 'POST', body: { username: $('#au').value.trim(), password: $('#ap').value } }); boot(); }
+    catch (err) { $('#ae').textContent = err.message; $('#ago').disabled = false; }
+  };
+}
+
+async function boot() {
+  timers.forEach(clearInterval); timers = [];
+  let st;
+  try { st = await (await fetch('/api/auth/status')).json(); }
+  catch { view.innerHTML = '<div class="empty err">Can\'t reach Vigil</div>'; return; }
+  if (st.setup_required) { me = null; return authView('setup'); }
+  if (!st.user) { me = null; return authView('login'); }
+  me = st.user;
+  document.body.classList.remove('auth');
+  document.body.classList.toggle('viewer', me.role !== 'admin');
+  $('#duser').textContent = `${me.username} · ${me.role}`;
+  $('#dver').textContent = 'Vigil ' + st.version;
+  route();
+}
+
+async function signOut() {
+  try { await api('/auth/logout', { method: 'POST' }); } catch { }
+  location.hash = '#/';
+  boot();
+}
+
+// ---------- Users (admin) and account ----------
+const ROLE_HELP = { admin: 'Can manage cameras, recording settings, users and everything else.', viewer: 'Can watch live view and recordings only.' };
+
+async function usersView() {
+  const us = await api('/users');
+  view.innerHTML = `<h2>Users</h2><div>${us.map(u => `<button class="clip card" data-u="${u.id}">
+    <span><b>${esc(u.username)}</b>${u.id === me.id ? ' <span class="sub">(you)</span>' : ''}</span>
+    <span class="pill ${u.role === 'admin' ? 'recording' : ''}">${u.role === 'admin' ? 'Admin' : 'Viewer'}</span></button>`).join('')}</div>
+    <a class="btn pri fab" href="#/users/new">+&nbsp; Add user</a>`;
+  view.onclick = e => { const b = e.target.closest('[data-u]'); if (b) location.hash = '#/users/' + b.dataset.u; };
+}
+
+const goUsers = () => location.hash === '#/users' ? route() : (location.hash = '#/users');
+
+function userSheet(u) {
+  const isNew = !u;
+  sheet(isNew ? 'Add user' : u.username, `<form id="uf" autocomplete="off">
+    ${isNew ? '<label for="un" style="margin-top:0">Username</label><input id="un" type="text" autocapitalize="off" required>' : ''}
+    <label${isNew ? '' : ' style="margin-top:0"'}>Role</label>
+    <div class="seg" id="role">${['viewer', 'admin'].map(r => `<button type="button" data-r="${r}" class="${(u?.role || 'viewer') === r ? 'on' : ''}">${r === 'admin' ? 'Admin' : 'Viewer'}</button>`).join('')}</div>
+    <div class="sub" id="rolehelp" style="margin-top:6px"></div>
+    <label for="up">${isNew ? 'Password' : 'New password'} <small>${isNew ? 'at least 8 characters' : 'leave blank to keep the current one'}</small></label>
+    <input id="up" type="password" autocomplete="new-password" minlength="8" ${isNew ? 'required' : ''}>
+    <div class="err" id="ue"></div>
+    <div class="actions"><button class="pri" id="usave">Save</button>${!isNew && u.id !== me.id ? '<button type="button" class="del" id="udel">Delete</button>' : ''}</div>
+  </form>`);
+  let role = u?.role || 'viewer';
+  const upd = () => {
+    document.querySelectorAll('#role button').forEach(b => b.classList.toggle('on', b.dataset.r === role));
+    $('#rolehelp').textContent = ROLE_HELP[role];
+  };
+  upd();
+  $('#role').onclick = e => { if (e.target.dataset.r) { role = e.target.dataset.r; upd(); } };
+  $('#uf').onsubmit = async e => {
+    e.preventDefault(); $('#usave').disabled = true; $('#ue').textContent = '';
+    try {
+      if (isNew) await api('/users', { method: 'POST', body: { username: $('#un').value.trim(), password: $('#up').value, role } });
+      else await api('/users/' + u.id, { method: 'PUT', body: { role, password: $('#up').value } });
+      goUsers();
+    } catch (err) { $('#ue').textContent = err.message; $('#usave').disabled = false; }
+  };
+  if (!isNew && u.id !== me.id) $('#udel').onclick = () => {
+    sheet('Delete user', `<p>Delete <b>${esc(u.username)}</b>? They will be signed out and lose access.</p>
+      <div class="err" id="de"></div><div class="actions"><button class="pri bad" id="dgo">Delete user</button></div>`);
+    $('#dgo').onclick = async () => {
+      try { await api('/users/' + u.id, { method: 'DELETE' }); goUsers(); } catch (err) { $('#de').textContent = err.message; }
+    };
+  };
+}
+
+function accountView() {
+  view.innerHTML = `<h2>Account</h2>
+    <div class="card pad"><dl><dt>Username</dt><dd>${esc(me.username)}</dd><dt>Role</dt><dd>${me.role === 'admin' ? 'Admin' : 'Viewer'}</dd></dl></div>
+    <h2 style="margin-top:20px">Change password</h2>
+    <form id="pf" class="card pad" autocomplete="off">
+      <label for="pc" style="margin-top:0">Current password</label><input id="pc" type="password" autocomplete="current-password" required>
+      <label for="pn">New password <small>at least 8 characters</small></label><input id="pn" type="password" autocomplete="new-password" required minlength="8">
+      <label for="pn2">Confirm new password</label><input id="pn2" type="password" autocomplete="new-password" required>
+      <div id="pm" class="err"></div>
+      <div class="actions"><button class="pri" id="psave">Change password</button></div>
+    </form>
+    <div class="actions" style="margin-top:20px"><button type="button" class="del" id="so">Sign out</button></div>`;
+  $('#so').onclick = signOut;
+  $('#pf').onsubmit = async e => {
+    e.preventDefault();
+    const m = $('#pm'); m.className = 'err'; m.textContent = '';
+    if ($('#pn').value !== $('#pn2').value) { m.textContent = 'Passwords do not match'; return; }
+    $('#psave').disabled = true;
+    try {
+      await api('/auth/password', { method: 'POST', body: { current: $('#pc').value, new: $('#pn').value } });
+      m.className = 'ok'; m.textContent = 'Password changed. Other devices have been signed out.'; $('#pf').reset();
+    } catch (err) { m.textContent = err.message; }
+    $('#psave').disabled = false;
+  };
+}
+
 // ---------- Router ----------
 async function route() {
   timers.forEach(clearInterval); timers = []; view.onclick = null; closeSheets(); closeDrawer();
   const [path, query] = location.hash.slice(1).split('?');
   const [, a, b] = path.split('/');
   const q = new URLSearchParams(query || '');
+  if (me.role !== 'admin' && ['camera', 'system', 'users'].includes(a)) { location.hash = '#/'; return; }
   document.querySelectorAll('nav a').forEach(n => n.classList.toggle('on',
-    n.dataset.t === (a === 'clips' ? 'clips' : a === 'system' ? 'system' : 'cams')));
+    n.dataset.t === (a === 'clips' ? 'clips' : a === 'system' ? 'system' : a === 'users' || a === 'account' ? '' : 'cams')));
   try {
     if (a === 'camera') { await camerasView(); await cameraForm(b, q.get('d')); }
     else if (a === 'clips') await clipsView(b);
     else if (a === 'system') await systemView();
+    else if (a === 'users') {
+      await usersView();
+      if (b === 'new') userSheet(null);
+      else if (b) { const t = (await api('/users')).find(u => u.id == b); if (t) userSheet(t); }
+    }
+    else if (a === 'account') accountView();
     else await camerasView();
   } catch (e) { view.innerHTML = `<div class="empty err">${esc(e.message)}</div>`; }
   window.scrollTo(0, 0);
 }
-addEventListener('hashchange', route);
-route();
+addEventListener('hashchange', () => me && route());
+boot();
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => { });

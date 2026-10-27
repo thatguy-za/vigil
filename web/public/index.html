@@ -21,10 +21,13 @@
   <div class="scrim"></div>
   <aside>
     <div class="dh"><b>Vigil</b><button type="button" class="x" aria-label="Close menu">×</button></div>
+    <div class="sub" id="duser" style="padding:0 16px 8px"></div>
     <a href="#/">Cameras</a>
-    <a href="#/camera">Add camera</a>
     <a href="#/clips">Recordings</a>
-    <a href="#/system">System</a>
+    <a href="#/system" data-admin>System</a>
+    <a href="#/users" data-admin>Users</a>
+    <a href="#/account">Account</a>
+    <button type="button" id="logout" class="dlink">Sign out</button>
     <div class="sub" id="dver" style="margin:auto 16px 0"></div>
   </aside>
 </div>
@@ -32,7 +35,7 @@
 <nav>
   <a href="#/" data-t="cams"><svg viewBox="0 0 24 24"><path d="M3 7h13v10H3zM16 10l5-3v10l-5-3"/></svg>Cameras</a>
   <a href="#/clips" data-t="clips"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Recordings</a>
-  <a href="#/system" data-t="system"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="6" rx="1"/><rect x="4" y="13" width="16" height="6" rx="1"/></svg>System</a>
+  <a href="#/system" data-t="system" data-admin><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="6" rx="1"/><rect x="4" y="13" width="16" height="6" rx="1"/></svg>System</a>
 </nav>
 <script type="module" src="app.js"></script>
 </body>

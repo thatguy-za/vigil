@@ -21,6 +21,16 @@ Open `http://<pi-ip>:8080` and use "Add to Home Screen". See [docker-compose.yml
 
 Publishing a GitHub release (e.g. `v0.1.0`) builds and pushes `ghcr.io/thatguy-za/vigil:0.1.0` and `:latest`.
 
+## Users
+
+The first time you open Vigil you create the admin account. Admins can add more users from the menu: **Admins** manage everything, **Viewers** can only watch live view and recordings (they never see camera passwords). Passwords are stored as argon2id hashes, and failed logins are rate-limited.
+
+Locked out? Reset a password from the Pi:
+
+```sh
+docker exec -it vigil /entrypoint.sh reset-password <username>
+```
+
 ## Notes
 
-There is no login yet. Keep Vigil on your LAN, or put it behind a VPN or reverse proxy with auth.
+Vigil serves plain HTTP. For access outside your LAN, put it behind a VPN or an HTTPS reverse proxy.

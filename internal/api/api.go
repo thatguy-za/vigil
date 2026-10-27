@@ -13,8 +13,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/thatguy-za/vigil/internal/auth"
 	"github.com/thatguy-za/vigil/internal/db"
 	"github.com/thatguy-za/vigil/internal/discover"
 	"github.com/thatguy-za/vigil/internal/hw"
@@ -34,6 +36,8 @@ type Server struct {
 	RecDir  string
 	Version string
 	started time.Time
+	lim     *auth.Limiter
+	userMu  sync.Mutex // serialises admin changes so the last admin can't be removed
 }
 
 type cameraView struct {
@@ -43,22 +47,34 @@ type cameraView struct {
 
 func (s *Server) Handler() http.Handler {
 	s.started = time.Now()
+	s.lim = auth.NewLimiter(8, 10*time.Minute)
 	m := http.NewServeMux()
-	m.HandleFunc("GET /api/system", s.system)
-	m.HandleFunc("GET /api/cameras", s.list)
-	m.HandleFunc("POST /api/cameras", s.save)
-	m.HandleFunc("POST /api/cameras/test", s.test)
-	m.HandleFunc("GET /api/cameras/{id}", s.get)
-	m.HandleFunc("PUT /api/cameras/{id}", s.save)
-	m.HandleFunc("DELETE /api/cameras/{id}", s.remove)
-	m.HandleFunc("GET /api/cameras/{id}/snapshot", s.snapshot)
-	m.HandleFunc("GET /api/cameras/{id}/recordings", s.recordings)
-	m.HandleFunc("GET /api/cameras/{id}/events", s.events)
-	m.HandleFunc("GET /api/discovery", s.discovered)
-	m.HandleFunc("POST /api/discovery/scan", s.scan)
-	m.HandleFunc("POST /api/discovery/{id}/dismiss", s.dismiss)
-	m.HandleFunc("POST /api/discovery/{id}/resolve", s.resolve)
-	m.HandleFunc("GET /files/", s.file)
+	user := func(h http.HandlerFunc) http.HandlerFunc { return s.require(false, h) }
+	admin := func(h http.HandlerFunc) http.HandlerFunc { return s.require(true, h) }
+	m.HandleFunc("GET /api/auth/status", s.authStatus)
+	m.HandleFunc("POST /api/auth/setup", s.open(s.setup))
+	m.HandleFunc("POST /api/auth/login", s.open(s.login))
+	m.HandleFunc("POST /api/auth/logout", s.open(s.logout))
+	m.HandleFunc("POST /api/auth/password", user(s.changePassword))
+	m.HandleFunc("GET /api/users", admin(s.listUsers))
+	m.HandleFunc("POST /api/users", admin(s.createUser))
+	m.HandleFunc("PUT /api/users/{id}", admin(s.updateUser))
+	m.HandleFunc("DELETE /api/users/{id}", admin(s.deleteUser))
+	m.HandleFunc("GET /api/system", admin(s.system))
+	m.HandleFunc("GET /api/cameras", user(s.list))
+	m.HandleFunc("POST /api/cameras", admin(s.save))
+	m.HandleFunc("POST /api/cameras/test", admin(s.test))
+	m.HandleFunc("GET /api/cameras/{id}", user(s.get))
+	m.HandleFunc("PUT /api/cameras/{id}", admin(s.save))
+	m.HandleFunc("DELETE /api/cameras/{id}", admin(s.remove))
+	m.HandleFunc("GET /api/cameras/{id}/snapshot", user(s.snapshot))
+	m.HandleFunc("GET /api/cameras/{id}/recordings", user(s.recordings))
+	m.HandleFunc("GET /api/cameras/{id}/events", user(s.events))
+	m.HandleFunc("GET /api/discovery", admin(s.discovered))
+	m.HandleFunc("POST /api/discovery/scan", admin(s.scan))
+	m.HandleFunc("POST /api/discovery/{id}/dismiss", admin(s.dismiss))
+	m.HandleFunc("POST /api/discovery/{id}/resolve", admin(s.resolve))
+	m.HandleFunc("GET /files/", user(s.file))
 	m.Handle("/", http.FileServerFS(web.Public()))
 	return m
 }
@@ -101,14 +117,14 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]cameraView, len(cams))
 	for i, c := range cams {
-		out[i] = cameraView{c, s.Rec.Status(c)}
+		out[i] = s.cameraFor(r, c)
 	}
 	jsonOut(w, 200, out)
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	if c, ok := s.camera(w, r); ok {
-		jsonOut(w, 200, cameraView{c, s.Rec.Status(c)})
+		jsonOut(w, 200, s.cameraFor(r, c))
 	}
 }
 
