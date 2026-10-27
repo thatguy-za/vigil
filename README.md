@@ -1,0 +1,24 @@
+# Vigil
+
+A lightweight NVR for Raspberry Pi (arm64: Pi 3B+, 4, 5) that runs in Docker in well under 1 GB of RAM.
+
+- Add cameras from your phone (RTSP URL, with a "Test connection" preview)
+- Record 24x7 or on a weekly schedule, in 5-minute clock-aligned MP4 segments (motion detection: coming)
+- Records the camera stream as-is (no re-encoding) by default; optional transcoding uses the Pi GPU (`h264_v4l2m2m`) on Pi 3B+/4
+- Installable mobile-first PWA
+
+## Run
+
+```sh
+docker compose up -d
+```
+
+Open `http://<pi-ip>:8080` and use "Add to Home Screen". See [docker-compose.yml](docker-compose.yml): set `PUID`, `PGID`, the config directory and the recordings directory.
+
+## Releases
+
+Publishing a GitHub release (e.g. `v0.1.0`) builds and pushes `ghcr.io/thatguy-za/vigil:0.1.0` and `:latest`.
+
+## Notes
+
+There is no login yet. Keep Vigil on your LAN, or put it behind a VPN or reverse proxy with auth.

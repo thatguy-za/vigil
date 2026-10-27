@@ -1,0 +1,18 @@
+services:
+  vigil:
+    image: ghcr.io/thatguy-za/vigil:latest
+    container_name: vigil
+    restart: unless-stopped
+    network_mode: host            # web UI on http://<pi>:8080 and camera discovery
+    environment:
+      - PUID=1000                 # run `id` on the Pi to find yours
+      - PGID=1000
+      - TZ=Europe/London
+    volumes:
+      - ./config:/config
+      - /mnt/recordings:/recordings   # point this at your USB SSD
+    # GPU video encoder/decoder (Pi 3B+ and Pi 4). Delete these lines on a Pi 5.
+    devices:
+      - /dev/video10:/dev/video10
+      - /dev/video11:/dev/video11
+      - /dev/video12:/dev/video12

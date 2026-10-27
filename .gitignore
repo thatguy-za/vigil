@@ -1,0 +1,5 @@
+/config/
+/recordings/
+/vigil
+*.db
+.DS_Store
