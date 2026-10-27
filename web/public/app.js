@@ -269,41 +269,102 @@ async function foundSection(pre) {
 }
 
 // ---------- Recordings ----------
-const fmtDur = s => s >= 90 ? Math.round(s / 60) + ' min' : Math.round(s) + ' s';
-const dayPct = t => { const d = new Date(t); return (d.getHours() * 3600 + d.getMinutes() * 60 + d.getSeconds()) / 864; };
+const fmtClock = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
+// Camera selector, then the camera view (live or playback), then a timeline.
 async function clipsView(camId, date) {
   const cams = await api('/cameras');
   if (!cams.length) { view.innerHTML = '<div class="empty">Add a camera first.</div>'; return; }
   const cam = cams.find(c => c.id == camId) || cams[0];
   const r = await api(`/cameras/${cam.id}/recordings` + (date ? `?date=${date}` : ''));
-  const evs = r.date ? await api(`/cameras/${cam.id}/events?date=${r.date}`) : [];
-  const evCount = c => evs.filter(e => e.clip === c.path).length;
+  const evs = (r.date ? await api(`/cameras/${cam.id}/events?date=${r.date}`) : []).map(e => ({ ...e, ms: +new Date(e.start) }));
+  const clips = r.clips.map(c => ({ ...c, ms: +new Date(c.start) })).sort((x, y) => x.ms - y.ms);
+  const t0 = r.date ? +new Date(r.date + 'T00:00:00') : 0; // local midnight
+  const pct = ms => (ms - t0) / 864000; // share of a 24 h day, in %
+  const di = r.dates.indexOf(r.date);
+
   view.innerHTML = `<h2>Recordings</h2>
     <div class="chips">${cams.map(c => `<button class="${c.id === cam.id ? 'on' : ''}" data-c="${c.id}">${esc(c.name)}</button>`).join('')}</div>
-    ${r.dates.length ? `<select id="date">${r.dates.map(d => `<option ${d === r.date ? 'selected' : ''}>${d}</option>`).join('')}</select>
-    <div class="tl">
-      ${r.clips.map((c, i) => `<i class="cv" data-i="${i}" style="left:${dayPct(c.start)}%;width:${Math.max(c.duration / 864, .3)}%"></i>`).join('')}
-      ${evs.map((e, i) => `<i class="ev" data-e="${i}" style="left:${dayPct(e.start)}%;width:${Math.max((new Date(e.end) - new Date(e.start)) / 864000, .5)}%"></i>`).join('')}
+    <div class="player"><img id="live" alt=""><video id="vid" controls playsinline hidden></video><span class="badge live" id="badge">LIVE</span></div>
+    ${r.dates.length ? `
+    <div class="tlbar"><button type="button" id="dprev" aria-label="Previous day" ${di >= r.dates.length - 1 ? 'disabled' : ''}>‹</button>
+      <select id="date">${r.dates.map(d => `<option ${d === r.date ? 'selected' : ''}>${d}</option>`).join('')}</select>
+      <button type="button" id="dnext" aria-label="Next day" ${di <= 0 ? 'disabled' : ''}>›</button></div>
+    <div class="tl" id="tl">
+      ${clips.map(c => `<i class="cv" style="left:${pct(c.ms)}%;width:${Math.max(c.duration / 864, .3)}%"></i>`).join('')}
+      ${evs.map(e => `<i class="ev" style="left:${pct(e.ms)}%;width:${Math.max((new Date(e.end) - e.ms) / 864000, .5)}%"></i>`).join('')}
+      <i class="playhead" id="head" hidden></i>
     </div>
     <div class="tlx"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
-    <div class="sub" style="margin-top:6px"><span class="key cv"></span> recorded <span class="key ev"></span> motion</div>
-    ${evs.length ? `<h2 style="margin-top:16px">Motion events</h2><div>${[...evs].reverse().map(e => `<button class="clip card evrow" data-e="${evs.indexOf(e)}"><span><b>${fmtTime(e.start)}</b> <span class="sub">${fmtDur((new Date(e.end) - new Date(e.start)) / 1000 + 1)} of movement · ${e.peak.toFixed(1)}% of frame</span></span><span class="sub">${e.clip ? 'Play' : 'Deleted'}</span></button>`).join('')}</div>` : ''}
-    <h2 style="margin-top:16px">Clips</h2>
-    <div>${r.clips.map((c, i) => `<button class="clip card" data-i="${i}"><span><b>${fmtTime(c.start)}</b> <span class="sub">${fmtDur(c.duration)}${evCount(c) ? ' · motion' : ''}${c.live ? ' · recording now' : ''}</span></span><span class="sub">${fmtBytes(c.bytes)}</span></button>`).join('')}</div>`
-      : '<div class="empty">No recordings yet.</div>'}`;
+    <div class="sub" style="margin-top:6px"><span class="key cv"></span> recorded <span class="key ev"></span> motion · tap or drag the timeline to jump</div>
+    <div class="evnav"><button type="button" id="pe" ${evs.length ? '' : 'disabled'}>‹ Prev event</button><button type="button" id="golive">Live</button><button type="button" id="ne" ${evs.length ? '' : 'disabled'}>Next event ›</button></div>`
+    : '<div class="empty">No recordings yet.</div>'}`;
   view.querySelector('.chips').onclick = e => e.target.dataset.c && (location.hash = `#/clips/${e.target.dataset.c}`);
+
+  const vid = $('#vid'), img = $('#live'), badge = $('#badge');
+  let cur = null, shown = 'live';
+
+  // live preview, refreshed while the live view is showing
+  const refresh = () => {
+    if (shown !== 'live' || img.dataset.busy) return;
+    img.dataset.busy = 1;
+    const n = new Image();
+    n.onload = () => { img.src = n.src; delete img.dataset.busy; };
+    n.onerror = () => delete img.dataset.busy;
+    n.src = `/api/cameras/${cam.id}/snapshot?t=${Date.now()}`;
+  };
+  refresh(); later(refresh, 2000);
   if (!r.dates.length) return;
+
+  const head = $('#head'), tl = $('#tl');
+  const setHead = ms => { head.hidden = false; head.style.left = pct(ms) + '%'; badge.textContent = fmtClock(ms); };
+  const goLive = () => {
+    shown = 'live'; cur = null; vid.pause(); vid.hidden = true; img.hidden = false; head.hidden = true;
+    badge.className = 'badge live'; badge.textContent = 'LIVE'; refresh();
+  };
+  const play = (c, offset = 0) => {
+    cur = c; shown = 'clip'; img.hidden = true; vid.hidden = false; badge.className = 'badge';
+    const seek = () => { vid.currentTime = Math.max(0, offset); };
+    if (vid.getAttribute('src') !== c.path) { vid.src = c.path; vid.onloadedmetadata = seek; } else seek();
+    setHead(c.ms + offset * 1000);
+    vid.play().catch(() => { });
+  };
+  // A whole day is ~250 s per pixel on a phone, so snap a tap to the nearest clip within ~24 px.
+  const playAt = ms => {
+    const tol = 24 * 86400000 / tl.getBoundingClientRect().width;
+    let best = null, bd = Infinity;
+    for (const c of clips) {
+      const end = c.ms + c.duration * 1000, d = ms < c.ms ? c.ms - ms : ms > end ? ms - end : 0;
+      if (d < bd) { best = c; bd = d; }
+    }
+    if (!best || bd > tol) return toast('No recording near that time');
+    play(best, bd === 0 ? (ms - best.ms) / 1000 : 0);
+  };
+  vid.ontimeupdate = () => cur && setHead(cur.ms + vid.currentTime * 1000);
+  vid.onended = () => { // keep going into the next clip when recording was continuous
+    const n = clips[clips.indexOf(cur) + 1];
+    if (n && n.ms - (cur.ms + cur.duration * 1000) < 15000) play(n);
+  };
+
+  const msAt = e => { const b = tl.getBoundingClientRect(); return t0 + Math.min(1, Math.max(0, (e.clientX - b.left) / b.width)) * 86400000; };
+  let drag = false;
+  tl.onpointerdown = e => { drag = true; tl.setPointerCapture(e.pointerId); setHead(msAt(e)); };
+  tl.onpointermove = e => drag && setHead(msAt(e));
+  tl.onpointerup = e => { if (drag) { drag = false; playAt(msAt(e)); } };
+  tl.onpointercancel = () => { drag = false; };
+
+  const nowMs = () => cur ? cur.ms + vid.currentTime * 1000 : Date.now();
+  const jump = ev => {
+    const c = clips.find(c => ev.clip === c.path);
+    if (!c) return toast('That clip has been deleted');
+    play(c, Math.max(0, (ev.ms - c.ms) / 1000 - 2));
+  };
+  $('#ne').onclick = () => { const e = evs.find(e => e.ms > nowMs() + 1000); e ? jump(e) : toast('No later events today'); };
+  $('#pe').onclick = () => { const e = [...evs].reverse().find(e => e.ms < nowMs() - 3000); e ? jump(e) : toast('No earlier events today'); };
+  $('#golive').onclick = goLive;
   $('#date').onchange = e => clipsView(cam.id, e.target.value);
-  const play = path => {
-    if (!path) return toast('That clip has been deleted');
-    sheet('Playback', `<video controls autoplay playsinline src="${esc(path)}"></video>`, closeSheets);
-  };
-  view.onclick = e => {
-    const t = e.target.closest('[data-i],[data-e]'); if (!t) return;
-    if (t.dataset.e !== undefined) play(evs[t.dataset.e].clip);
-    else play(r.clips[t.dataset.i].path);
-  };
+  $('#dprev').onclick = () => clipsView(cam.id, r.dates[di + 1]);
+  $('#dnext').onclick = () => clipsView(cam.id, r.dates[di - 1]);
 }
 
 // ---------- System ----------
