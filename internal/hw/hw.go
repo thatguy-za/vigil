@@ -41,12 +41,7 @@ var boardRe = regexp.MustCompile(`(?:Pi|Module) (\d)`)
 
 func Detect() Info {
 	i := Info{Cores: runtime.NumCPU(), MemMB: memMB()}
-	if b, err := os.ReadFile("/proc/device-tree/model"); err == nil {
-		i.Model = strings.TrimRight(string(b), "\x00\n ")
-		if m := boardRe.FindStringSubmatch(i.Model); m != nil {
-			i.Board, _ = strconv.Atoi(m[1])
-		}
-	}
+	i.Model, i.Board = readModel()
 	if i.Model == "" {
 		i.Model = "Unknown ARM64 device"
 	}
@@ -56,6 +51,62 @@ func Detect() Info {
 	}
 	i.Recommendation = recommend(i)
 	return i
+}
+
+// readModel returns the board model and generation (3, 4, 5 or 0 if unknown).
+func readModel() (string, int) {
+	for _, p := range []string{"/proc/device-tree/model", "/sys/firmware/devicetree/base/model"} {
+		if b, err := os.ReadFile(p); err == nil {
+			if m := strings.TrimRight(string(b), "\x00\n "); m != "" {
+				return m, boardOf(m)
+			}
+		}
+	}
+	// Docker hides /sys/firmware, which /proc/device-tree points into, so
+	// inside a container fall back to /proc/cpuinfo.
+	if b, err := os.ReadFile("/proc/cpuinfo"); err == nil {
+		return parseCPUInfo(string(b))
+	}
+	return "", 0
+}
+
+func boardOf(model string) int {
+	m := boardRe.FindStringSubmatch(model)
+	if m == nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(m[1])
+	return n
+}
+
+// parseCPUInfo reads the model from the "Model" line, or else guesses the
+// generation from the SoC named on the "Hardware" line.
+func parseCPUInfo(s string) (string, int) {
+	var model, hardware string
+	for _, line := range strings.Split(s, "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch strings.TrimSpace(k) {
+		case "Model":
+			model = strings.TrimSpace(v)
+		case "Hardware":
+			hardware = strings.TrimSpace(v)
+		}
+	}
+	if model != "" {
+		return model, boardOf(model)
+	}
+	switch hardware {
+	case "BCM2712":
+		return "Raspberry Pi 5", 5
+	case "BCM2711":
+		return "Raspberry Pi 4", 4
+	case "BCM2837", "BCM2835": // 64-bit boards with this SoC name are Pi 3 class
+		return "Raspberry Pi 3", 3
+	}
+	return "", 0
 }
 
 func memMB() int {

@@ -124,45 +124,69 @@ const MASK_CELLS = 16 * 9;
 const dow = col => (col + 1) % 7; // grid columns start Monday, schedule index starts Sunday
 
 let linkedDiscovery = null; // discovered device the camera being added came from
+let foundSel = null;        // device picked from "Found on your network"
+
+// Adding a camera is two steps: 1) the camera's address and login, which Vigil
+// uses to find the streams, 2) streams, transcoding and recording details.
+// Editing an existing camera shows step 2 only.
 async function cameraForm(id, preselect) {
-  linkedDiscovery = null;
+  linkedDiscovery = null; foundSel = null;
   const [sys, existing] = await Promise.all([api('/system'), id ? api('/cameras/' + id) : null]);
   const c = existing || { name: '', url: '', sub_url: '', mode: 'continuous', schedule: '0'.repeat(168), transcode: false, max_height: 720, audio: false, retention_days: 14, motion_mask: '' };
   if (c.schedule.length !== 168) c.schedule = '0'.repeat(168);
   const enc = sys.hw.encoder;
   sheet(id ? 'Edit camera' : 'Add camera', `
-  <form id="f" autocomplete="off">
-    ${id ? '' : '<div id="found"><div class="sub">Looking for cameras on your network…</div></div>'}
-    <label for="name" style="margin-top:0">Name</label>
-    <input id="name" type="text" value="${esc(c.name)}" placeholder="Front door" required>
-    <label for="url">Stream URL <small>RTSP</small></label>
-    <input id="url" type="url" value="${esc(c.url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream1" required inputmode="url" autocapitalize="off">
-    <div class="actions" style="margin-top:10px"><button type="button" id="test">Test connection</button></div>
-    <div id="prev"></div>
-    <label for="sub">Sub-stream URL <small>optional, low resolution; used for live preview</small></label>
-    <input id="sub" type="url" value="${esc(c.sub_url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream2" inputmode="url" autocapitalize="off">
-    <label>Record</label>
-    <div class="seg" id="mode">${['off', 'continuous', 'schedule', 'motion'].map(m =>
-      `<button type="button" data-m="${m}" class="${c.mode === m ? 'on' : ''}" >${MODES[m]}</button>`).join('')}</div>
-    <div id="sched" hidden></div>
-    <div id="motion" hidden>
-      <label for="sens">Motion sensitivity <small>higher catches smaller movement</small></label>
-      <input id="sens" type="range" min="1" max="10" value="${c.motion_sensitivity || 5}" style="width:100%">
-      <label>Ignore areas <small>paint over trees, timestamps or busy roads</small></label>
-      <div class="maskbox"><img id="maskimg" alt=""><div class="mask" id="mask">${Array.from({ length: MASK_CELLS }, (_, i) => `<div data-i="${i}"></div>`).join('')}</div></div>
-      <div class="actions" style="margin-top:8px"><button type="button" id="maskclr">Clear</button></div>
-      <div class="sub" style="margin-top:8px">${sys.hw.hw_decode ? 'GPU decoding will be used to analyse the video.' : 'The video is analysed on the CPU.'} Adding a low-resolution sub-stream above makes this much lighter. Clips include 5 s before and 10 s after the movement.</div>
+  <form id="f" autocomplete="off" novalidate>
+    ${id ? '' : `<div class="stepper"><span class="on" id="st1"></span><span id="st2"></span></div>
+    <div id="stepname" class="sub" style="margin-bottom:12px"></div>
+    <div id="s1">
+      <div id="found"><div class="sub">Looking for cameras on your network…</div></div>
+      <label for="host" style="margin-top:8px">Camera address <small>IP address or hostname</small></label>
+      <input id="host" type="text" placeholder="192.168.1.20" autocapitalize="off" autocomplete="off" inputmode="url">
+      <div class="two">
+        <div><label for="cu">Username</label><input id="cu" type="text" value="admin" autocapitalize="off" autocomplete="off"></div>
+        <div><label for="cp">Password</label><input id="cp" type="password" autocomplete="new-password"></div>
+      </div>
+      <button type="button" class="pri" id="detect" style="width:100%;margin-top:14px">Connect</button>
+      <div id="dmsg" style="margin-top:12px"></div>
+      <div style="margin-top:12px"><button type="button" class="link" id="manual">Enter the stream URL manually instead</button></div>
+    </div>`}
+    <div id="s2" ${id ? '' : 'hidden'}>
+      <label for="name" style="margin-top:0">Name</label>
+      <input id="name" type="text" value="${esc(c.name)}" placeholder="Front door">
+      <div id="prev"></div>
+      <details id="urls" ${id ? 'open' : ''}>
+        <summary>Stream URLs</summary>
+        <label for="url">Main stream <small>RTSP</small></label>
+        <input id="url" type="url" value="${esc(c.url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream1" inputmode="url" autocapitalize="off">
+        <label for="sub">Sub-stream <small>optional, low resolution; used for live preview</small></label>
+        <input id="sub" type="url" value="${esc(c.sub_url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream2" inputmode="url" autocapitalize="off">
+        <div class="actions" style="margin-top:12px"><button type="button" id="test">Test connection</button></div>
+      </details>
+      <label>Record</label>
+      <div class="seg" id="mode">${['off', 'continuous', 'schedule', 'motion'].map(m =>
+        `<button type="button" data-m="${m}" class="${c.mode === m ? 'on' : ''}">${MODES[m]}</button>`).join('')}</div>
+      <div id="sched" hidden></div>
+      <div id="motion" hidden>
+        <label for="sens">Motion sensitivity <small>higher catches smaller movement</small></label>
+        <input id="sens" type="range" min="1" max="10" value="${c.motion_sensitivity || 5}" style="width:100%">
+        <label>Ignore areas <small>paint over trees, timestamps or busy roads</small></label>
+        <div class="maskbox"><img id="maskimg" alt=""><div class="mask" id="mask">${Array.from({ length: MASK_CELLS }, (_, i) => `<div data-i="${i}"></div>`).join('')}</div></div>
+        <div class="actions" style="margin-top:8px"><button type="button" id="maskclr">Clear</button></div>
+        <div class="sub" style="margin-top:8px">${sys.hw.hw_decode ? 'GPU decoding will be used to analyse the video.' : 'The video is analysed on the CPU.'} A low-resolution sub-stream makes this much lighter. Clips include 5 s before and 10 s after the movement.</div>
+      </div>
+      <div class="sw"><span>Record audio<small>Saves the camera's microphone with each recording, converted to AAC so it plays in any browser. Leave off if you only need video.</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
+      <div class="sw"><span>Transcode video<small>Re-encodes video as H.264 at a smaller size so it plays in any browser and uses less storage. Normally the camera's stream is saved untouched, which costs almost no CPU. ${enc.hardware ? `Your GPU encoder (${esc(enc.name)}) will be used.` : `This board has no GPU encoder, so it would use the CPU (${esc(enc.name)}).`} Turn on only if playback fails or you need smaller files.</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
+      <div id="tcopt" hidden><label for="mh">Max height</label>
+        <select id="mh">${[480, 720, 1080].map(h => `<option ${c.max_height === h ? 'selected' : ''}>${h}</option>`).join('')}</select></div>
+      <label for="ret">Keep recordings for <small>(Days. 0 = disabled)</small></label>
+      <input id="ret" type="number" min="0" max="3650" value="${c.retention_days}" inputmode="numeric">
+      <div id="err" class="err"></div>
+      <div class="actions">${id ? '' : '<button type="button" id="back">Back</button>'}<button class="pri" id="save" type="submit">Save</button>${id ? '<button type="button" class="del" id="del">Delete</button>' : ''}</div>
     </div>
-    <div class="sw"><span>Record audio<small>Saves the camera's microphone with each recording, converted to AAC so it plays in any browser. Leave off if you only need video.</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
-    <div class="sw"><span>Transcode video<small>Re-encodes video as H.264 at a smaller size so it plays in any browser and uses less storage. Normally the camera's stream is saved untouched, which costs almost no CPU. ${enc.hardware ? `Your GPU encoder (${esc(enc.name)}) will be used.` : `This board has no GPU encoder, so it would use the CPU (${esc(enc.name)}).`} Turn on only if playback fails or you need smaller files.</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
-    <div id="tcopt" hidden><label for="mh">Max height</label>
-      <select id="mh">${[480, 720, 1080].map(h => `<option ${c.max_height === h ? 'selected' : ''}>${h}</option>`).join('')}</select></div>
-    <label for="ret">Keep recordings for <small>(Days. 0 = disabled)</small></label>
-    <input id="ret" type="number" min="0" max="3650" value="${c.retention_days}" inputmode="numeric">
-    <div id="err" class="err"></div>
-    <div class="actions"><button class="pri" id="save">Save</button>${id ? '<button type="button" class="del" id="del">Delete</button>' : ''}</div>
   </form>`);
 
+  // ----- step 2 controls -----
   let mode = c.mode, sched = c.schedule.split('');
   const mask = (c.motion_mask?.length === MASK_CELLS ? c.motion_mask : '0'.repeat(MASK_CELLS)).split('');
   const drawMask = () => $('#mask').childNodes.forEach((el, i) => el.classList.toggle('on', mask[i] === '1'));
@@ -196,7 +220,6 @@ async function cameraForm(id, preselect) {
     };
   };
   drawSched(); upd();
-  if (!id) foundSection(preselect);
 
   $('#test').onclick = async e => {
     const b = e.target, url = $('#url').value.trim();
@@ -206,18 +229,93 @@ async function cameraForm(id, preselect) {
       if (!r.ok) throw new Error((await r.json()).error || 'failed');
       const blobUrl = URL.createObjectURL(await r.blob());
       $('#maskimg').src = blobUrl;
-      $('#prev').innerHTML = `<div class="preview"><img src="${blobUrl}" alt="Camera preview"></div><div class="sub">Connected.</div>`;
-    } catch (err) { $('#prev').innerHTML = `<div class="err" style="margin-top:8px">${esc(err.message)}</div>`; }
+      $('#prev').innerHTML = `<div class="preview"><img src="${blobUrl}" alt="Camera preview"></div>`;
+    } catch (err) { $('#prev').innerHTML = `<div class="err" style="margin-top:8px">Couldn't get a picture: ${esc(err.message)}</div>`; }
     b.disabled = false; b.textContent = 'Test connection';
   };
 
+  // ----- step switching (new cameras only) -----
+  let step = id ? 2 : 1, advance = null;
+  const NAMES = ['Step 1 of 2 · Camera login', 'Step 2 of 2 · Streams and recording'];
+  const show = n => {
+    step = n;
+    if (id) return;
+    clearTimeout(advance);
+    $('#s1').hidden = n !== 1; $('#s2').hidden = n !== 2;
+    $('#st1').classList.toggle('on', true); $('#st2').classList.toggle('on', n === 2);
+    $('#stepname').textContent = NAMES[n - 1];
+    document.querySelector('.panel').scrollTop = 0;
+  };
+  const toStep2 = manual => {
+    if (!$('#name').value.trim()) $('#name').value = foundSel?.name || ('Camera ' + ($('#host').value.trim() || ''));
+    $('#urls').open = manual || !$('#url').value;
+    show(2);
+    if ($('#url').value.trim() && !$('#prev').innerHTML) $('#test').click();
+  };
+
+  if (!id) {
+    show(1);
+    foundSection(preselect);
+    $('#back').onclick = () => show(1);
+    $('#manual').onclick = () => toStep2(true);
+    $('#detect').onclick = async e => {
+      const b = e.target, msg = $('#dmsg'), host = $('#host').value.trim();
+      if (!host) { msg.innerHTML = '<div class="err">Enter the camera\'s IP address first.</div>'; $('#host').focus(); return; }
+      b.disabled = true; b.textContent = 'Connecting…';
+      const steps = [];
+      const draw = (state, text) => {
+        msg.innerHTML = '<div class="steps">' + steps.map((s, i) => `<div class="step ${i === steps.length - 1 && !state ? 'run' : 'done'}"><i></i><span>${esc(s)}</span></div>`).join('') +
+          (state ? `<div class="step ${state}"><i></i><span>${esc(text)}</span></div>` : '<div class="sub" style="margin-top:6px">This can take up to 30 seconds.</div>') + '</div>';
+      };
+      steps.push('Contacting ' + host + '…'); draw();
+      let final = null, ok = false;
+      try {
+        const resp = await fetch('/api/cameras/detect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, username: $('#cu').value, password: $('#cp').value, discovery_id: foundSel && foundSel.host === host ? foundSel.id : '' }) });
+        if (resp.status === 401) { boot(); throw new Error('Please sign in'); }
+        if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Something went wrong');
+        const reader = resp.body.getReader(), dec = new TextDecoder();
+        let buf = '';
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (value) buf += dec.decode(value, { stream: true });
+          let nl;
+          while ((nl = buf.indexOf('\n')) >= 0) {
+            const line = buf.slice(0, nl).trim(); buf = buf.slice(nl + 1);
+            if (!line) continue;
+            const ev = JSON.parse(line);
+            if (ev.step) { steps.push(ev.step); draw(); } else final = ev;
+          }
+          if (done) break;
+        }
+        if (!final) throw new Error('The connection was interrupted. Try again.');
+        if (final.error) throw new Error(final.error);
+        const r = final.result;
+        $('#url').value = r.url; $('#sub').value = r.sub_url; $('#prev').innerHTML = '';
+        linkedDiscovery = foundSel && foundSel.host === host ? foundSel.id : null;
+        const d = x => x ? ` (${x})` : '';
+        draw('ok', `Connected! Found the main stream${d(r.main_info)} and ${r.sub_url ? 'a sub-stream' + d(r.sub_info) : 'no sub-stream'}.`);
+        ok = true;
+      } catch (err) {
+        draw('bad', err.message);
+        if (/username or password/i.test(err.message)) $('#cp').focus();
+      }
+      b.disabled = false; b.textContent = 'Connect';
+      if (ok) advance = setTimeout(() => toStep2(false), 1200); // let them read the result, then move on
+    };
+  }
+
   $('#f').onsubmit = async e => {
     e.preventDefault();
+    if (!id && step === 1) { $('#detect').click(); return; } // Enter in step 1 = Connect
+    const err = m => { $('#err').textContent = m; $('#save').disabled = false; };
+    if (!$('#name').value.trim()) return err('Give the camera a name.');
+    if (!$('#url').value.trim()) { $('#urls').open = true; return err('Enter the main stream URL.'); }
     $('#save').disabled = true; $('#err').textContent = '';
     const body = { name: $('#name').value, url: $('#url').value, sub_url: $('#sub').value, mode, schedule: sched.join(''),
       transcode: $('#tc').checked, max_height: +$('#mh').value, audio: $('#audio').checked, retention_days: +$('#ret').value || 0, motion_sensitivity: +$('#sens').value, motion_mask: mask.includes('1') ? mask.join('') : '' };
     try { await api(id ? '/cameras/' + id : '/cameras' + (linkedDiscovery ? '?discovery=' + encodeURIComponent(linkedDiscovery) : ''), { method: id ? 'PUT' : 'POST', body }); location.hash = '#/'; }
-    catch (err) { $('#err').textContent = err.message; $('#save').disabled = false; }
+    catch (e2) { err(e2.message); }
   };
   if (id) $('#del').onclick = () => {
     sheet('Delete camera', `<p>Delete <b>${esc(c.name)}</b>?</p>
@@ -231,41 +329,29 @@ async function cameraForm(id, preselect) {
 }
 
 // "Found on your network": ONVIF cameras that are new or were dismissed earlier.
+// Picking one fills in its address; the login is entered below it.
 async function foundSection(pre) {
   const box = $('#found');
-  let items = [], sel = pre;
+  let items = [];
   const draw = () => {
-    box.innerHTML = `<div class="found-h" style="margin-top:0"><b>Found on your network</b></div>` +
-      (items.length ? items.map(d => `<div class="fcam ${d.id === sel ? 'sel' : ''}">
-        <button type="button" class="fpick" data-d="${esc(d.id)}"><span><b>${esc(d.name)}</b> <span class="sub">${esc(d.host)}${d.status === 'dismissed' ? ' · dismissed' : ''}</span></span><span class="sub">${d.id === sel ? 'Selected' : 'Use'}</span></button>
-        ${d.id === sel ? `<div class="fcreds"><div class="sub">Enter the camera's login so Vigil can find its streams.</div>
-          <input id="fu" type="text" placeholder="Username" autocapitalize="off" autocomplete="off" value="admin">
-          <input id="fp" type="password" placeholder="Password" autocomplete="new-password">
-          <button type="button" class="pri" id="fgo" style="margin-top:10px;width:100%">Connect</button><div class="err" id="fe"></div></div>` : ''}</div>`).join('')
-        : '<div class="sub" style="margin:8px 0">No ONVIF cameras found. Enter a stream URL below instead.</div>');
-    if (sel) box.querySelector('.fcam.sel')?.scrollIntoView({ block: 'nearest' });
+    if (!items.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="found-h" style="margin-top:0"><b>Found on your network</b></div>' + items.map(d => `
+      <div class="fcam ${foundSel?.id === d.id ? 'sel' : ''}">
+        <button type="button" class="fpick" data-d="${esc(d.id)}"><span><b>${esc(d.name)}</b> <span class="sub">${esc(d.host)}${d.status === 'dismissed' ? ' · dismissed' : ''}</span></span><span class="sub">${foundSel?.id === d.id ? 'Selected' : 'Use'}</span></button>
+      </div>`).join('');
   };
-  const name = () => items.find(d => d.id === sel)?.name;
-  box.onclick = async e => {
-    const t = e.target.closest('button'); if (!t) return;
-    if (t.classList.contains('fpick')) {
-      sel = t.dataset.d; if (!$('#name').value) $('#name').value = name() || ''; draw();
-    } else if (t.id === 'fgo') {
-      t.disabled = true; t.textContent = 'Connecting…'; $('#fe').textContent = '';
-      try {
-        const r = await api(`/discovery/${sel}/resolve`, { method: 'POST', body: { username: $('#fu').value, password: $('#fp').value } });
-        linkedDiscovery = sel;
-        $('#url').value = r.url; $('#sub').value = r.sub_url;
-        if (!$('#name').value) $('#name').value = r.name;
-        $('#fe').className = 'ok'; $('#fe').textContent = r.sub_url ? 'Found the main and sub streams.' : 'Found the stream.';
-        $('#test').click();
-      } catch (err) { $('#fe').className = 'err'; $('#fe').textContent = err.message; }
-      t.disabled = false; t.textContent = 'Connect';
-    }
+  const pick = id => {
+    foundSel = items.find(d => d.id === id) || null;
+    if (!foundSel) return;
+    $('#host').value = foundSel.host;
+    if (!$('#name').value) $('#name').value = foundSel.name;
+    draw();
+    $('#cp').focus();
   };
+  box.onclick = e => { const t = e.target.closest('.fpick'); if (t) pick(t.dataset.d); };
   try { items = await api('/discovery'); } catch { }
-  if (sel && !$('#name').value) $('#name').value = name() || '';
   draw();
+  if (pre) pick(pre);
 }
 
 // ---------- Recordings ----------

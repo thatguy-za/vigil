@@ -109,3 +109,16 @@ func TestResolve(t *testing.T) {
 		t.Fatalf("expected ErrAuth, got %v", err)
 	}
 }
+
+func TestFindDevice(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<s:Envelope xmlns:s="x"><s:Body><GetSystemDateAndTimeResponse/></s:Body></s:Envelope>`)
+	}))
+	defer srv.Close()
+	port := 0
+	fmt.Sscanf(srv.URL[strings.LastIndex(srv.URL, ":")+1:], "%d", &port)
+	got := FindDevice(context.Background(), "127.0.0.1", []int{1, port})
+	if len(got) != 1 || !strings.Contains(got[0], fmt.Sprint(port)) {
+		t.Fatalf("got %v", got)
+	}
+}

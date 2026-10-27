@@ -18,6 +18,7 @@ import (
 
 	"github.com/thatguy-za/vigil/internal/auth"
 	"github.com/thatguy-za/vigil/internal/db"
+	"github.com/thatguy-za/vigil/internal/detect"
 	"github.com/thatguy-za/vigil/internal/discover"
 	"github.com/thatguy-za/vigil/internal/hw"
 	"github.com/thatguy-za/vigil/internal/live"
@@ -64,6 +65,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/cameras", user(s.list))
 	m.HandleFunc("POST /api/cameras", admin(s.save))
 	m.HandleFunc("POST /api/cameras/test", admin(s.test))
+	m.HandleFunc("POST /api/cameras/detect", admin(s.detect))
 	m.HandleFunc("GET /api/cameras/{id}", user(s.get))
 	m.HandleFunc("PUT /api/cameras/{id}", admin(s.save))
 	m.HandleFunc("DELETE /api/cameras/{id}", admin(s.remove))
@@ -432,5 +434,48 @@ func (s *Server) resolve(w http.ResponseWriter, r *http.Request) {
 		fail(w, 502, err.Error())
 	default:
 		jsonOut(w, 200, map[string]string{"name": d.Name, "url": mainURL, "sub_url": subURL})
+	}
+}
+
+// detect finds a camera's stream URLs from its address and login. It streams
+// newline-delimited JSON: {"step": "..."} lines while working, then one final
+// {"result": {...}} or {"error": "...", "code": 401} line.
+func (s *Server) detect(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Host, Username, Password string
+		DiscoveryID              string `json:"discovery_id"`
+	}
+	if json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<13)).Decode(&b) != nil {
+		fail(w, 400, "invalid JSON")
+		return
+	}
+	req := detect.Request{Host: b.Host, User: b.Username, Pass: b.Password}
+	if b.DiscoveryID != "" {
+		if d, err := s.DB.DiscoveredByID(b.DiscoveryID); err == nil {
+			req.XAddr = d.XAddr
+		}
+	}
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, _ := w.(http.Flusher)
+	send := func(v any) {
+		json.NewEncoder(w).Encode(v)
+		if fl != nil {
+			fl.Flush()
+		}
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	res, err := detect.Detect(ctx, req, func(step string) { send(map[string]string{"step": step}) })
+	switch {
+	case errors.Is(err, detect.ErrAuth):
+		send(map[string]any{"error": "Wrong username or password", "code": 401})
+	case errors.Is(err, detect.ErrUnreachable):
+		send(map[string]any{"error": err.Error(), "code": 502})
+	case err != nil:
+		send(map[string]any{"error": err.Error(), "code": 404})
+	default:
+		send(map[string]any{"result": res})
 	}
 }

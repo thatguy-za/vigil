@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -187,7 +188,19 @@ func (c *client) call(ctx context.Context, endpoint, body string, auth bool) ([]
 
 // Resolve logs in to an ONVIF device and returns its main (highest resolution)
 // and sub (lowest resolution) RTSP URLs with the credentials embedded.
+// Streams are the RTSP URLs a camera offers, with credentials embedded.
+type Streams struct {
+	Main, Sub       string
+	MainRes, SubRes string // "1920x1080", "" if the camera didn't say
+}
+
+// Resolve is ResolveInfo without the resolutions.
 func Resolve(ctx context.Context, xaddr, user, pass string) (mainURL, subURL string, err error) {
+	r, err := ResolveInfo(ctx, xaddr, user, pass)
+	return r.Main, r.Sub, err
+}
+
+func ResolveInfo(ctx context.Context, xaddr, user, pass string) (Streams, error) {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	c := &client{http: &http.Client{Timeout: 8 * time.Second}, user: user, pass: pass}
@@ -214,7 +227,7 @@ func Resolve(ctx context.Context, xaddr, user, pass string) (mainURL, subURL str
 	media := xaddr // most cameras answer media calls on the device service too
 	if b, err := c.call(ctx, xaddr, `<GetCapabilities xmlns="http://www.onvif.org/ver10/device/wsdl"><Category>Media</Category></GetCapabilities>`, true); err != nil {
 		if errors.Is(err, ErrAuth) {
-			return "", "", err
+			return Streams{}, err
 		}
 	} else {
 		var r struct {
@@ -233,7 +246,7 @@ func Resolve(ctx context.Context, xaddr, user, pass string) (mainURL, subURL str
 
 	b, err := c.call(ctx, media, `<GetProfiles xmlns="http://www.onvif.org/ver10/media/wsdl"/>`, true)
 	if err != nil {
-		return "", "", err
+		return Streams{}, err
 	}
 	var pr struct {
 		Profiles []struct {
@@ -243,11 +256,12 @@ func Resolve(ctx context.Context, xaddr, user, pass string) (mainURL, subURL str
 		} `xml:"Body>GetProfilesResponse>Profiles"`
 	}
 	if err := xml.Unmarshal(b, &pr); err != nil || len(pr.Profiles) == 0 {
-		return "", "", errors.New("the camera has no video profiles")
+		return Streams{}, errors.New("the camera has no video profiles")
 	}
 	type stream struct {
 		uri    string
 		pixels int
+		w, h   int
 	}
 	var streams []stream
 	for _, p := range pr.Profiles {
@@ -269,22 +283,59 @@ func Resolve(ctx context.Context, xaddr, user, pass string) (mainURL, subURL str
 			u.Host = net.JoinHostPort(base.Hostname(), u.Port())
 		}
 		u.User = url.UserPassword(user, pass)
-		streams = append(streams, stream{u.String(), p.W * p.H})
+		streams = append(streams, stream{u.String(), p.W * p.H, p.W, p.H})
 	}
 	if len(streams) == 0 {
-		return "", "", errors.New("the camera did not return a stream address")
+		return Streams{}, errors.New("the camera did not return a stream address")
 	}
 	hi, lo := streams[0], streams[0]
-	for _, s := range streams {
-		if s.pixels > hi.pixels {
-			hi = s
+	for _, st := range streams {
+		if st.pixels > hi.pixels {
+			hi = st
 		}
-		if s.pixels < lo.pixels {
-			lo = s
+		if st.pixels < lo.pixels {
+			lo = st
 		}
 	}
+	res := func(st stream) string {
+		if st.w == 0 || st.h == 0 {
+			return ""
+		}
+		return fmt.Sprintf("%dx%d", st.w, st.h)
+	}
+	out := Streams{Main: hi.uri, MainRes: res(hi)}
 	if lo.uri != hi.uri && lo.pixels < hi.pixels {
-		return hi.uri, lo.uri, nil
+		out.Sub, out.SubRes = lo.uri, res(lo)
 	}
-	return hi.uri, "", nil
+	return out, nil
+}
+
+// DefaultPorts are where cameras commonly serve ONVIF.
+var DefaultPorts = []int{80, 8080, 8000, 8899, 2020, 5000, 8081, 8001}
+
+// FindDevice returns the ONVIF device-service URLs that answer on host.
+// A device that demands a login even for this call still counts as present.
+func FindDevice(ctx context.Context, host string, ports []int) []string {
+	c := &client{http: &http.Client{Timeout: 2 * time.Second}}
+	found := make([]string, len(ports))
+	var wg sync.WaitGroup
+	for i, port := range ports {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ep := "http://" + net.JoinHostPort(host, fmt.Sprint(port)) + "/onvif/device_service"
+			_, err := c.call(ctx, ep, `<GetSystemDateAndTime xmlns="http://www.onvif.org/ver10/device/wsdl"/>`, false)
+			if err == nil || errors.Is(err, ErrAuth) {
+				found[i] = ep
+			}
+		}()
+	}
+	wg.Wait()
+	var out []string
+	for _, f := range found {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
 }

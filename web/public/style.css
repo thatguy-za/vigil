@@ -107,3 +107,22 @@ body.viewer [data-admin]{display:none!important}
 .tl{height:48px;touch-action:pan-y;cursor:pointer}
 .tl i.playhead{width:2px;background:#fff;top:0;bottom:0;cursor:default;pointer-events:none;box-shadow:0 0 0 1px #0006}
 .evnav{display:flex;gap:8px;margin-top:12px}.evnav button{flex:1;padding:0 8px;white-space:nowrap}.evnav #golive{flex:0 0 72px}
+
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+details{margin-top:16px;border:1px solid var(--line);border-radius:12px;padding:0 14px;background:var(--card)}
+details summary{min-height:46px;display:flex;align-items:center;cursor:pointer;font-weight:600;font-size:14px}
+details[open] summary{border-bottom:1px solid var(--line)}
+details>:last-child{margin-bottom:14px}
+details label:first-of-type{margin-top:12px}
+
+.steps{display:flex;flex-direction:column;gap:6px;font-size:14px;color:var(--fg)}
+.step{display:flex;align-items:flex-start;gap:10px}
+.step i{flex:0 0 16px;height:16px;margin-top:2px;border-radius:50%;border:2px solid var(--line);box-sizing:border-box}
+.step.done{color:var(--mut)}.step.done i{border-color:var(--ok);background:var(--ok)}
+.step.run i{border-color:var(--line);border-top-color:var(--acc);animation:spin .8s linear infinite}
+.step.ok{color:var(--ok);font-weight:600}.step.ok i{border-color:var(--ok);background:var(--ok)}
+.step.bad{color:var(--bad)}.step.bad i{border-color:var(--bad);background:var(--bad)}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.stepper{display:flex;gap:8px;margin:8px 0 8px}
+.stepper span{flex:1;height:4px;border-radius:2px;background:var(--line)}.stepper span.on{background:var(--acc)}

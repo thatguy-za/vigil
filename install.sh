@@ -61,6 +61,15 @@ $D run -d --name portainer --restart unless-stopped \
   -v portainer_data:/data \
   portainer/portainer-ce:latest >/dev/null
 
+# A fresh Portainer prints a one-time setup token in its logs; the first-visit
+# screen asks for it. Wait for it so we can show it at the end.
+PORTAINER_TOKEN=""
+for _ in $(seq 1 30); do
+  PORTAINER_TOKEN="$($D logs portainer 2>&1 | grep -o 'setup_token=[0-9a-f]\+' | head -1 | cut -d= -f2 || true)"
+  [ -n "$PORTAINER_TOKEN" ] && break
+  sleep 1
+done
+
 # ---------- Vigil ----------
 say "Starting Vigil"
 # GPU video encoder/decoder nodes exist on the Pi 3B+ and 4, not the Pi 5.
@@ -83,10 +92,16 @@ $D run -d --name vigil --restart unless-stopped \
 
 # ---------- done ----------
 IP="$(hostname -I | awk '{print $1}')"
+if [ -n "$PORTAINER_TOKEN" ]; then
+  PORTAINER_NOTE="Setup token: $PORTAINER_TOKEN  (paste it on the first-visit screen)"
+else
+  PORTAINER_NOTE="No setup token found; Portainer may already be set up. To look: docker logs portainer 2>&1 | grep setup_token"
+fi
 say "Done"
 cat <<EOF
 Vigil:      http://$IP:8080     (first visit: create your admin account)
-Portainer:  https://$IP:9443    (first visit: create the Portainer admin within 5 minutes)
+Portainer:  https://$IP:9443    (first visit: enter the setup token, then create the Portainer admin)
+            $PORTAINER_NOTE
 
 Config:      $CONFIG_DIR
 Recordings:  $RECORDINGS
