@@ -70,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("PUT /api/cameras/{id}", admin(s.save))
 	m.HandleFunc("DELETE /api/cameras/{id}", admin(s.remove))
 	m.HandleFunc("GET /api/cameras/{id}/snapshot", user(s.snapshot))
+	m.HandleFunc("GET /api/cameras/{id}/live.mp4", user(s.liveVideo))
 	m.HandleFunc("GET /api/cameras/{id}/recordings", user(s.recordings))
 	m.HandleFunc("GET /api/cameras/{id}/events", user(s.events))
 	m.HandleFunc("GET /api/discovery", admin(s.discovered))
@@ -477,5 +478,50 @@ func (s *Server) detect(w http.ResponseWriter, r *http.Request) {
 		send(map[string]any{"error": err.Error(), "code": 404})
 	default:
 		send(map[string]any{"result": res})
+	}
+}
+
+// liveVideo streams the camera as fragmented MP4 for the browser's Media Source.
+// The codec goes in X-Codec so the page can set up its buffer before any data.
+func (s *Server) liveVideo(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.camera(w, r)
+	if !ok {
+		return
+	}
+	sub, err := s.Live.Subscribe(c)
+	if err != nil {
+		code := 503
+		if errors.Is(err, live.ErrUnsupported) {
+			code = 415
+		}
+		fail(w, code, err.Error())
+		return
+	}
+	defer sub.Close()
+	h := w.Header()
+	h.Set("Content-Type", "video/mp4")
+	h.Set("X-Codec", sub.Codec)
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Accel-Buffering", "no")
+	fl, _ := w.(http.Flusher)
+	w.Write(sub.Init)
+	if fl != nil {
+		fl.Flush()
+	}
+	for {
+		select {
+		case b, ok := <-sub.C:
+			if !ok {
+				return
+			}
+			if _, err := w.Write(b); err != nil {
+				return
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+		case <-r.Context().Done():
+			return
+		}
 	}
 }

@@ -3,6 +3,8 @@ const view = $('#view');
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 let timers = [];
 const later = (fn, ms) => { const t = setInterval(fn, ms); timers.push(t); };
+const leaving = []; // run (and cleared) when the page changes
+const onLeave = fn => leaving.push(fn);
 
 async function api(path, opts = {}) {
   const r = await fetch('/api' + path, {
@@ -11,7 +13,7 @@ async function api(path, opts = {}) {
   });
   if (r.status === 204) return null;
   const j = await r.json().catch(() => ({}));
-  if (r.status === 401 && !path.startsWith('/auth/')) { boot(); throw new Error('Please sign in'); }
+  if (r.status === 401 && !path.startsWith('/auth/')) { boot(); throw new Error('Signed out'); }
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
 }
@@ -54,12 +56,83 @@ const pill = s => `<span class="pill ${s.state}">${{ recording: 'Recording', wat
 const fmtBytes = b => b > 2 ** 30 ? (b / 2 ** 30).toFixed(1) + ' GB' : b > 2 ** 20 ? (b / 2 ** 20).toFixed(0) + ' MB' : Math.round(b / 1024) + ' KB';
 const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+// ---------- Live video ----------
+// Plays /live.mp4 through Media Source (H.264 only). If that isn't possible, or the
+// stream keeps dropping, it shows a fresh still every 2 s instead.
+function livePlayer(vid, img, camId, badge) {
+  const MS = window.ManagedMediaSource || window.MediaSource;
+  let gen = 0, ctrl = null, snapTimer = null, retry = null;
+  const setBadge = live => { if (badge) { badge.className = 'badge live'; badge.textContent = live ? 'LIVE' : 'STILLS'; } };
+  const snap = () => {
+    if (img.dataset.busy) return;
+    img.dataset.busy = 1;
+    const n = new Image();
+    n.onload = () => { img.src = n.src; delete img.dataset.busy; };
+    n.onerror = () => delete img.dataset.busy;
+    n.src = `/api/cameras/${camId}/snapshot?t=${Date.now()}`;
+  };
+  const showStills = () => { vid.hidden = true; img.hidden = false; setBadge(false); snap(); snapTimer ||= setInterval(snap, 2000); };
+  const stopStills = () => { clearInterval(snapTimer); snapTimer = null; };
+
+  async function video(myGen) {
+    ctrl = new AbortController();
+    const resp = await fetch(`/api/cameras/${camId}/live.mp4`, { signal: ctrl.signal });
+    if (!resp.ok) {
+      const e = new Error((await resp.json().catch(() => ({}))).error || resp.status);
+      e.fatal = resp.status === 415;
+      throw e;
+    }
+    const type = `video/mp4; codecs="${resp.headers.get('X-Codec')}"`;
+    if (!MS || !MS.isTypeSupported(type)) { const e = new Error('This browser can\'t play the stream'); e.fatal = true; throw e; }
+    const ms = new MS();
+    vid.disableRemotePlayback = true;
+    vid.src = URL.createObjectURL(ms);
+    await new Promise(r => ms.addEventListener('sourceopen', r, { once: true }));
+    const sb = ms.addSourceBuffer(type);
+    sb.mode = 'sequence';
+    const queue = [];
+    const pump = () => { if (!sb.updating && queue.length) { try { sb.appendBuffer(queue.shift()); } catch { queue.length = 0; } } };
+    sb.addEventListener('updateend', () => {
+      const b = sb.buffered;
+      if (b.length) {
+        const end = b.end(b.length - 1);
+        if (end - vid.currentTime > 2.5) vid.currentTime = end - 0.4; // stay near the live edge
+        if (end - b.start(0) > 20) { try { sb.remove(0, end - 10); return; } catch { } }
+      }
+      pump();
+    });
+    const reader = resp.body.getReader();
+    let shown = false;
+    while (gen === myGen) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      queue.push(value); pump();
+      if (!shown) { shown = true; vid.hidden = false; img.hidden = true; stopStills(); setBadge(true); vid.play().catch(() => { }); }
+    }
+  }
+  async function loop(myGen) {
+    showStills(); // something to look at while the video connects
+    for (let attempt = 0; attempt < 4 && gen === myGen; attempt++) {
+      try { await video(myGen); }
+      catch (e) { if (e.name === 'AbortError' || gen !== myGen) return; if (e.fatal) break; }
+      if (gen !== myGen) return;
+      showStills();
+      await new Promise(r => retry = setTimeout(r, 2000 + attempt * 2000));
+    }
+    if (gen === myGen) showStills();
+  }
+  return {
+    start() { gen++; loop(gen); },
+    stop() { gen++; ctrl?.abort(); clearTimeout(retry); stopStills(); vid.pause(); vid.removeAttribute('src'); vid.load(); },
+  };
+}
+
 // ---------- Cameras ----------
 async function camerasView() {
   const admin = me.role === 'admin';
   const [cams, found] = await Promise.all([api('/cameras'), admin ? api('/discovery').catch(() => []) : []]);
   const fresh = found.filter(d => d.status === 'new');
-  const foundHtml = fresh.length ? `<div class="found card pad" id="homefound"><h2>New cameras found</h2>${fresh.map(d => `
+  const foundHtml = fresh.length ? `<div class="found card pad" id="homefound"><h2>Found on your network</h2>${fresh.map(d => `
     <div class="fhome" data-d="${esc(d.id)}"><div><b>${esc(d.name)}</b><div class="sub">${esc(d.host)}</div></div>
     <div class="fa"><button class="pri" data-add>Add</button><button data-dis>Dismiss</button></div></div>`).join('')}</div>` : '';
   view.onclick = async e => {
@@ -72,21 +145,22 @@ async function camerasView() {
     }
   };
   if (!cams.length) {
-    if (!admin) { view.innerHTML = '<div class="empty"><h2>No cameras yet</h2><p>Ask an admin to add one.</p></div>'; return; }
-    const sys = await api('/system');
-    view.innerHTML = foundHtml + `<div class="empty"><h2>No cameras yet</h2>
-      <p>Add an RTSP or ONVIF camera to start recording.</p>
-      <p class="sub">${esc(sys.hw.recommendation.summary)}</p>
-      <a class="btn pri" href="#/camera">Add your first camera</a></div>`;
+    if (!admin) { view.innerHTML = '<div class="empty"><h2>No cameras</h2><p>An admin needs to add one.</p></div>'; return; }
+    view.innerHTML = foundHtml + `<div class="empty"><h2>No cameras</h2>
+      <p>Add one to start recording.</p>
+      <a class="btn pri" href="#/camera">Add camera</a></div>`;
     return;
   }
-  view.innerHTML = foundHtml + `<div class="grid">${cams.map(c => `
-    <a class="card cam" href="${admin ? '#/camera/' + c.id : '#/clips/' + c.id}">
-      <div class="thumb"><span>Loading preview…</span><img data-id="${c.id}" alt=""></div>
-      <div class="row"><div><b>${esc(c.name)}</b><div class="sub">${MODES[c.mode]}${c.transcode ? ' · transcoded' : ''}</div></div>${pill(c.status)}</div>
-      ${c.status.state === 'error' ? `<div class="row err">${esc(c.status.error)}</div>` : ''}
-    </a>`).join('')}</div>
-    ${admin ? '<a class="btn pri fab" href="#/camera">+&nbsp; Add camera</a>' : ''}`;
+  view.innerHTML = `<div class="head"><h2>Cameras</h2>${admin ? '<a class="btn" href="#/camera">Add camera</a>' : ''}</div>` + foundHtml +
+    `<div class="grid">${cams.map(c => `
+    <div class="card cam">
+      <div class="thumb"><span>no picture</span><img data-id="${c.id}" alt="">
+        <a class="cover" href="#/live/${c.id}" aria-label="Live view of ${esc(c.name)}"></a>
+        <div class="tl-top">${pill(c.status)}${admin ? `<a class="tedit" href="#/camera/${c.id}">Edit</a>` : ''}</div>
+        <div class="tl-bot"><span>${esc(c.name)}</span><span class="mono">${MODES[c.mode]}${c.transcode ? ', transcoded' : ''}</span></div>
+      </div>
+      ${c.status.state === 'error' ? `<div class="tile-err err">${esc(c.status.error)}</div>` : ''}
+    </div>`).join('')}</div>`;
   const imgs = [...view.querySelectorAll('img')];
   const refresh = () => imgs.forEach(img => {
     if (img.dataset.busy) return;
@@ -107,6 +181,19 @@ async function updateStatus() {
       if (cams[i]) el.querySelector('.pill').outerHTML = pill(cams[i].status);
     });
   } catch { }
+}
+
+// ---------- Live page ----------
+async function liveView(id) {
+  const cam = (await api('/cameras')).find(c => c.id == id);
+  if (!cam) { view.innerHTML = '<div class="empty">Camera not found.</div>'; return; }
+  view.innerHTML = `<div class="head"><h2>${esc(cam.name)}</h2>${pill(cam.status)}</div>
+    <div class="player"><img alt=""><video muted autoplay playsinline hidden></video><span class="badge live" id="badge">LIVE</span></div>
+    <div class="evnav"><button type="button" id="fs">Fullscreen</button><a class="btn" href="#/clips/${cam.id}">Recordings</a>${me.role === 'admin' ? `<a class="btn" href="#/camera/${cam.id}">Edit</a>` : ''}</div>`;
+  const box = view.querySelector('.player'), v = box.querySelector('video');
+  const lp = livePlayer(v, box.querySelector('img'), cam.id, $('#badge'));
+  lp.start(); onLeave(lp.stop);
+  $('#fs').onclick = () => { if (!v.hidden && v.webkitEnterFullscreen) v.webkitEnterFullscreen(); else (box.requestFullscreen || box.webkitRequestFullscreen)?.call(box); };
 }
 
 // ---------- Add / edit camera ----------
@@ -140,8 +227,8 @@ async function cameraForm(id, preselect) {
     ${id ? '' : `<div class="stepper"><span class="on" id="st1"></span><span id="st2"></span></div>
     <div id="stepname" class="sub" style="margin-bottom:12px"></div>
     <div id="s1">
-      <div id="found"><div class="sub">Looking for cameras on your network…</div></div>
-      <label for="host" style="margin-top:8px">Camera address <small>IP address or hostname</small></label>
+      <div id="found"><div class="sub">Scanning the network…</div></div>
+      <label for="host" style="margin-top:8px">Address <small>IP or hostname</small></label>
       <input id="host" type="text" placeholder="192.168.1.20" autocapitalize="off" autocomplete="off" inputmode="url">
       <div class="two">
         <div><label for="cu">Username</label><input id="cu" type="text" value="admin" autocapitalize="off" autocomplete="off"></div>
@@ -149,7 +236,7 @@ async function cameraForm(id, preselect) {
       </div>
       <button type="button" class="pri" id="detect" style="width:100%;margin-top:14px">Connect</button>
       <div id="dmsg" style="margin-top:12px"></div>
-      <div style="margin-top:12px"><button type="button" class="link" id="manual">Enter the stream URL manually instead</button></div>
+      <div style="margin-top:12px"><button type="button" class="link" id="manual">Enter stream URLs by hand</button></div>
     </div>`}
     <div id="s2" ${id ? '' : 'hidden'}>
       <label for="name" style="margin-top:0">Name</label>
@@ -159,24 +246,24 @@ async function cameraForm(id, preselect) {
         <summary>Stream URLs</summary>
         <label for="url">Main stream <small>RTSP</small></label>
         <input id="url" type="url" value="${esc(c.url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream1" inputmode="url" autocapitalize="off">
-        <label for="sub">Sub-stream <small>optional, low resolution; used for live preview</small></label>
+        <label for="sub">Sub-stream <small>optional, low resolution</small></label>
         <input id="sub" type="url" value="${esc(c.sub_url)}" placeholder="rtsp://user:pass@192.168.1.20:554/stream2" inputmode="url" autocapitalize="off">
         <div class="actions" style="margin-top:12px"><button type="button" id="test">Test connection</button></div>
       </details>
-      <label>Record</label>
+      <label>Recording</label>
       <div class="seg" id="mode">${['off', 'continuous', 'schedule', 'motion'].map(m =>
         `<button type="button" data-m="${m}" class="${c.mode === m ? 'on' : ''}">${MODES[m]}</button>`).join('')}</div>
       <div id="sched" hidden></div>
       <div id="motion" hidden>
-        <label for="sens">Motion sensitivity <small>higher catches smaller movement</small></label>
+        <label for="sens">Sensitivity <small>higher picks up smaller movement</small></label>
         <input id="sens" type="range" min="1" max="10" value="${c.motion_sensitivity || 5}" style="width:100%">
-        <label>Ignore areas <small>paint over trees, timestamps or busy roads</small></label>
+        <label>Ignore zones <small>paint over trees, timestamps, roads</small></label>
         <div class="maskbox"><img id="maskimg" alt=""><div class="mask" id="mask">${Array.from({ length: MASK_CELLS }, (_, i) => `<div data-i="${i}"></div>`).join('')}</div></div>
         <div class="actions" style="margin-top:8px"><button type="button" id="maskclr">Clear</button></div>
-        <div class="sub" style="margin-top:8px">${sys.hw.hw_decode ? 'GPU decoding will be used to analyse the video.' : 'The video is analysed on the CPU.'} A low-resolution sub-stream makes this much lighter. Clips include 5 s before and 10 s after the movement.</div>
+        <div class="sub" style="margin-top:8px">Analysis runs on the ${sys.hw.hw_decode ? 'GPU' : 'CPU'}; a sub-stream makes it much cheaper. Clips run from 5 s before to 10 s after the motion.</div>
       </div>
-      <div class="sw"><span>Record audio<small>Saves the camera's microphone with each recording, converted to AAC so it plays in any browser. Leave off if you only need video.</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
-      <div class="sw"><span>Transcode video<small>Re-encodes video as H.264 at a smaller size so it plays in any browser and uses less storage. Normally the camera's stream is saved untouched, which costs almost no CPU. ${enc.hardware ? `Your GPU encoder (${esc(enc.name)}) will be used.` : `This board has no GPU encoder, so it would use the CPU (${esc(enc.name)}).`} Turn on only if playback fails or you need smaller files.</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
+      <div class="sw"><span>Record audio<small>Saved as AAC.</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
+      <div class="sw"><span>Transcode video<small>Off: the camera's stream is saved as is, which is cheapest. On: re-encode to H.264 on the ${enc.hardware ? 'GPU' : 'CPU'} (${esc(enc.name)}).</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
       <div id="tcopt" hidden><label for="mh">Max height</label>
         <select id="mh">${[480, 720, 1080].map(h => `<option ${c.max_height === h ? 'selected' : ''}>${h}</option>`).join('')}</select></div>
       <label for="ret">Keep recordings for <small>(Days. 0 = disabled)</small></label>
@@ -230,13 +317,13 @@ async function cameraForm(id, preselect) {
       const blobUrl = URL.createObjectURL(await r.blob());
       $('#maskimg').src = blobUrl;
       $('#prev').innerHTML = `<div class="preview"><img src="${blobUrl}" alt="Camera preview"></div>`;
-    } catch (err) { $('#prev').innerHTML = `<div class="err" style="margin-top:8px">Couldn't get a picture: ${esc(err.message)}</div>`; }
+    } catch (err) { $('#prev').innerHTML = `<div class="err" style="margin-top:8px">No picture: ${esc(err.message)}</div>`; }
     b.disabled = false; b.textContent = 'Test connection';
   };
 
   // ----- step switching (new cameras only) -----
   let step = id ? 2 : 1, advance = null;
-  const NAMES = ['Step 1 of 2 · Camera login', 'Step 2 of 2 · Streams and recording'];
+  const NAMES = ['Step 1 of 2: camera login', 'Step 2 of 2: streams and recording'];
   const show = n => {
     step = n;
     if (id) return;
@@ -260,19 +347,19 @@ async function cameraForm(id, preselect) {
     $('#manual').onclick = () => toStep2(true);
     $('#detect').onclick = async e => {
       const b = e.target, msg = $('#dmsg'), host = $('#host').value.trim();
-      if (!host) { msg.innerHTML = '<div class="err">Enter the camera\'s IP address first.</div>'; $('#host').focus(); return; }
+      if (!host) { msg.innerHTML = '<div class="err">Enter the camera\'s address.</div>'; $('#host').focus(); return; }
       b.disabled = true; b.textContent = 'Connecting…';
       const steps = [];
       const draw = (state, text) => {
         msg.innerHTML = '<div class="steps">' + steps.map((s, i) => `<div class="step ${i === steps.length - 1 && !state ? 'run' : 'done'}"><i></i><span>${esc(s)}</span></div>`).join('') +
-          (state ? `<div class="step ${state}"><i></i><span>${esc(text)}</span></div>` : '<div class="sub" style="margin-top:6px">This can take up to 30 seconds.</div>') + '</div>';
+          (state ? `<div class="step ${state}"><i></i><span>${esc(text)}</span></div>` : '<div class="sub" style="margin-top:6px">Can take up to 30 s on a Pi.</div>') + '</div>';
       };
-      steps.push('Contacting ' + host + '…'); draw();
+      steps.push('Starting'); draw();
       let final = null, ok = false;
       try {
         const resp = await fetch('/api/cameras/detect', { method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ host, username: $('#cu').value, password: $('#cp').value, discovery_id: foundSel && foundSel.host === host ? foundSel.id : '' }) });
-        if (resp.status === 401) { boot(); throw new Error('Please sign in'); }
+        if (resp.status === 401) { boot(); throw new Error('Signed out'); }
         if (!resp.ok) throw new Error((await resp.json().catch(() => ({}))).error || 'Something went wrong');
         const reader = resp.body.getReader(), dec = new TextDecoder();
         let buf = '';
@@ -294,7 +381,7 @@ async function cameraForm(id, preselect) {
         $('#url').value = r.url; $('#sub').value = r.sub_url; $('#prev').innerHTML = '';
         linkedDiscovery = foundSel && foundSel.host === host ? foundSel.id : null;
         const d = x => x ? ` (${x})` : '';
-        draw('ok', `Connected! Found the main stream${d(r.main_info)} and ${r.sub_url ? 'a sub-stream' + d(r.sub_info) : 'no sub-stream'}.`);
+        draw('ok', `Main stream${d(r.main_info)}. ${r.sub_url ? 'Sub-stream' + d(r.sub_info) + '.' : 'No sub-stream.'}`);
         ok = true;
       } catch (err) {
         draw('bad', err.message);
@@ -309,8 +396,8 @@ async function cameraForm(id, preselect) {
     e.preventDefault();
     if (!id && step === 1) { $('#detect').click(); return; } // Enter in step 1 = Connect
     const err = m => { $('#err').textContent = m; $('#save').disabled = false; };
-    if (!$('#name').value.trim()) return err('Give the camera a name.');
-    if (!$('#url').value.trim()) { $('#urls').open = true; return err('Enter the main stream URL.'); }
+    if (!$('#name').value.trim()) return err('Name is required.');
+    if (!$('#url').value.trim()) { $('#urls').open = true; return err('Main stream URL is required.'); }
     $('#save').disabled = true; $('#err').textContent = '';
     const body = { name: $('#name').value, url: $('#url').value, sub_url: $('#sub').value, mode, schedule: sched.join(''),
       transcode: $('#tc').checked, max_height: +$('#mh').value, audio: $('#audio').checked, retention_days: +$('#ret').value || 0, motion_sensitivity: +$('#sens').value, motion_mask: mask.includes('1') ? mask.join('') : '' };
@@ -360,7 +447,7 @@ const fmtClock = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', mi
 // Camera selector, then the camera view (live or playback), then a timeline.
 async function clipsView(camId, date) {
   const cams = await api('/cameras');
-  if (!cams.length) { view.innerHTML = '<div class="empty">Add a camera first.</div>'; return; }
+  if (!cams.length) { view.innerHTML = '<div class="empty">No cameras.</div>'; return; }
   const cam = cams.find(c => c.id == camId) || cams[0];
   const r = await api(`/cameras/${cam.id}/recordings` + (date ? `?date=${date}` : ''));
   const evs = (r.date ? await api(`/cameras/${cam.id}/events?date=${r.date}`) : []).map(e => ({ ...e, ms: +new Date(e.start) }));
@@ -371,7 +458,7 @@ async function clipsView(camId, date) {
 
   view.innerHTML = `<h2>Recordings</h2>
     <div class="chips">${cams.map(c => `<button class="${c.id === cam.id ? 'on' : ''}" data-c="${c.id}">${esc(c.name)}</button>`).join('')}</div>
-    <div class="player"><img id="live" alt=""><video id="vid" controls playsinline hidden></video><span class="badge live" id="badge">LIVE</span></div>
+    <div class="player"><img id="live" alt=""><video id="lv" muted autoplay playsinline hidden></video><video id="vid" controls playsinline hidden></video><span class="badge live" id="badge">LIVE</span></div>
     ${r.dates.length ? `
     <div class="tlbar"><button type="button" id="dprev" aria-label="Previous day" ${di >= r.dates.length - 1 ? 'disabled' : ''}>‹</button>
       <select id="date">${r.dates.map(d => `<option ${d === r.date ? 'selected' : ''}>${d}</option>`).join('')}</select>
@@ -382,34 +469,24 @@ async function clipsView(camId, date) {
       <i class="playhead" id="head" hidden></i>
     </div>
     <div class="tlx"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
-    <div class="sub" style="margin-top:6px"><span class="key cv"></span> recorded <span class="key ev"></span> motion · tap or drag the timeline to jump</div>
+    <div class="sub" style="margin-top:6px"><span class="key cv"></span>recorded <span class="key ev"></span>motion. Tap the timeline to jump.</div>
     <div class="evnav"><button type="button" id="pe" ${evs.length ? '' : 'disabled'}>‹ Prev event</button><button type="button" id="golive">Live</button><button type="button" id="ne" ${evs.length ? '' : 'disabled'}>Next event ›</button></div>`
     : '<div class="empty">No recordings yet.</div>'}`;
   view.querySelector('.chips').onclick = e => e.target.dataset.c && (location.hash = `#/clips/${e.target.dataset.c}`);
 
-  const vid = $('#vid'), img = $('#live'), badge = $('#badge');
-  let cur = null, shown = 'live';
-
-  // live preview, refreshed while the live view is showing
-  const refresh = () => {
-    if (shown !== 'live' || img.dataset.busy) return;
-    img.dataset.busy = 1;
-    const n = new Image();
-    n.onload = () => { img.src = n.src; delete img.dataset.busy; };
-    n.onerror = () => delete img.dataset.busy;
-    n.src = `/api/cameras/${cam.id}/snapshot?t=${Date.now()}`;
-  };
-  refresh(); later(refresh, 2000);
+  const vid = $('#vid'), lv = $('#lv'), img = $('#live'), badge = $('#badge');
+  let cur = null;
+  const lp = livePlayer(lv, img, cam.id, badge);
+  lp.start(); onLeave(lp.stop);
   if (!r.dates.length) return;
 
   const head = $('#head'), tl = $('#tl');
   const setHead = ms => { head.hidden = false; head.style.left = pct(ms) + '%'; badge.textContent = fmtClock(ms); };
   const goLive = () => {
-    shown = 'live'; cur = null; vid.pause(); vid.hidden = true; img.hidden = false; head.hidden = true;
-    badge.className = 'badge live'; badge.textContent = 'LIVE'; refresh();
+    cur = null; vid.pause(); vid.hidden = true; head.hidden = true; lp.start();
   };
   const play = (c, offset = 0) => {
-    cur = c; shown = 'clip'; img.hidden = true; vid.hidden = false; badge.className = 'badge';
+    cur = c; lp.stop(); img.hidden = true; lv.hidden = true; vid.hidden = false; badge.className = 'badge';
     const seek = () => { vid.currentTime = Math.max(0, offset); };
     if (vid.getAttribute('src') !== c.path) { vid.src = c.path; vid.onloadedmetadata = seek; } else seek();
     setHead(c.ms + offset * 1000);
@@ -442,7 +519,7 @@ async function clipsView(camId, date) {
   const nowMs = () => cur ? cur.ms + vid.currentTime * 1000 : Date.now();
   const jump = ev => {
     const c = clips.find(c => ev.clip === c.path);
-    if (!c) return toast('That clip has been deleted');
+    if (!c) return toast('Clip deleted');
     play(c, Math.max(0, (ev.ms - c.ms) / 1000 - 2));
   };
   $('#ne').onclick = () => { const e = evs.find(e => e.ms > nowMs() + 1000); e ? jump(e) : toast('No later events today'); };
@@ -474,8 +551,8 @@ let me = null;
 function authView(kind) {
   document.body.classList.add('auth'); closeSheets(); closeDrawer();
   const setup = kind === 'setup';
-  view.innerHTML = `<div class="authbox card pad"><h2 style="margin-bottom:4px">${setup ? 'Welcome to Vigil' : 'Sign in'}</h2>
-    <div class="sub">${setup ? 'Create the admin account. You can add more users afterwards.' : 'Enter your username and password.'}</div>
+  view.innerHTML = `<div class="authbox card pad"><h2 style="margin-bottom:4px">${setup ? 'Create the first account' : 'Sign in'}</h2>
+    ${setup ? '<div class="sub">It will be an admin. Add other users later from the menu.</div>' : ''}
     <form id="af">
       <label for="au">Username</label><input id="au" type="text" autocapitalize="off" autocomplete="username" required>
       <label for="ap">Password${setup ? ' <small>at least 8 characters</small>' : ''}</label>
@@ -516,14 +593,14 @@ async function signOut() {
 }
 
 // ---------- Users (admin) and account ----------
-const ROLE_HELP = { admin: 'Can manage cameras, recording settings, users and everything else.', viewer: 'Can watch live view and recordings only.' };
+const ROLE_HELP = { admin: 'Full access.', viewer: 'Live view and recordings only.' };
 
 async function usersView() {
   const us = await api('/users');
-  view.innerHTML = `<h2>Users</h2><div>${us.map(u => `<button class="clip card" data-u="${u.id}">
+  view.innerHTML = `<div class="head"><h2>Users</h2><a class="btn" href="#/users/new">Add user</a></div><div class="users-list">${us.map(u => `<button class="clip card" data-u="${u.id}">
     <span><b>${esc(u.username)}</b>${u.id === me.id ? ' <span class="sub">(you)</span>' : ''}</span>
     <span class="pill ${u.role === 'admin' ? 'recording' : ''}">${u.role === 'admin' ? 'Admin' : 'Viewer'}</span></button>`).join('')}</div>
-    <a class="btn pri fab" href="#/users/new">+&nbsp; Add user</a>`;
+    `;
   view.onclick = e => { const b = e.target.closest('[data-u]'); if (b) location.hash = '#/users/' + b.dataset.u; };
 }
 
@@ -557,7 +634,7 @@ function userSheet(u) {
     } catch (err) { $('#ue').textContent = err.message; $('#usave').disabled = false; }
   };
   if (!isNew && u.id !== me.id) $('#udel').onclick = () => {
-    sheet('Delete user', `<p>Delete <b>${esc(u.username)}</b>? They will be signed out and lose access.</p>
+    sheet('Delete user', `<p>Delete <b>${esc(u.username)}</b>? They are signed out straight away.</p>
       <div class="err" id="de"></div><div class="actions"><button class="pri bad" id="dgo">Delete user</button></div>`);
     $('#dgo').onclick = async () => {
       try { await api('/users/' + u.id, { method: 'DELETE' }); goUsers(); } catch (err) { $('#de').textContent = err.message; }
@@ -585,7 +662,7 @@ function accountView() {
     $('#psave').disabled = true;
     try {
       await api('/auth/password', { method: 'POST', body: { current: $('#pc').value, new: $('#pn').value } });
-      m.className = 'ok'; m.textContent = 'Password changed. Other devices have been signed out.'; $('#pf').reset();
+      m.className = 'ok'; m.textContent = 'Password changed. Other sessions were signed out.'; $('#pf').reset();
     } catch (err) { m.textContent = err.message; }
     $('#psave').disabled = false;
   };
@@ -593,7 +670,7 @@ function accountView() {
 
 // ---------- Router ----------
 async function route() {
-  timers.forEach(clearInterval); timers = []; view.onclick = null; closeSheets(); closeDrawer();
+  timers.forEach(clearInterval); timers = []; leaving.splice(0).forEach(f => f()); view.onclick = null; closeSheets(); closeDrawer();
   const [path, query] = location.hash.slice(1).split('?');
   const [, a, b] = path.split('/');
   const q = new URLSearchParams(query || '');
@@ -603,6 +680,7 @@ async function route() {
   try {
     if (a === 'camera') { await camerasView(); await cameraForm(b, q.get('d')); }
     else if (a === 'clips') await clipsView(b);
+    else if (a === 'live') await liveView(b);
     else if (a === 'system') await systemView();
     else if (a === 'users') {
       await usersView();

@@ -1,6 +1,7 @@
-// Package live keeps a low-rate JPEG preview per camera. A single ffmpeg
-// process decodes only keyframes of the sub-stream while someone is viewing,
-// and stops after a short idle period, so previews cost almost nothing.
+// Package live serves live pictures and video from cameras. This file keeps a
+// low-rate JPEG preview per camera: one ffmpeg process decodes only the
+// keyframes of the sub-stream while someone is looking, and stops after a short
+// idle period, so previews cost almost nothing. stream.go does live video.
 package live
 
 import (
@@ -29,9 +30,14 @@ type Hub struct {
 	ctx   context.Context
 	mu    sync.Mutex
 	feeds map[int64]*feed
+
+	smu     sync.Mutex // guards streams (see stream.go)
+	streams map[int64]*stream
 }
 
-func New(ctx context.Context) *Hub { return &Hub{ctx: ctx, feeds: map[int64]*feed{}} }
+func New(ctx context.Context) *Hub {
+	return &Hub{ctx: ctx, feeds: map[int64]*feed{}, streams: map[int64]*stream{}}
+}
 
 func (h *Hub) Frame(c db.Camera) ([]byte, error) {
 	url := c.SubURL

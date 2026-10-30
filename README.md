@@ -1,36 +1,73 @@
 # Vigil
 
-A lightweight NVR for Raspberry Pi (arm64: Pi 3B+, 4, 5) that runs in Docker in well under 1 GB of RAM.
+A small network video recorder for Raspberry Pi. It runs in Docker on 64-bit Pi 3B+, 4 and 5, and is meant to fit in 1 GB of RAM with the OS. The web UI is a PWA laid out for phones first.
 
-- Add cameras from your phone (RTSP URL, with a "Test connection" preview)
-- ONVIF auto-discovery: cameras on your network appear on the home page; enter the camera login and Vigil fills in the main and sub-stream URLs (needs `network_mode: host`)
-- Record 24x7 or on a weekly schedule, in 5-minute clock-aligned MP4 segments or on motion (with 5 s pre-roll and 10 s post-roll), with paintable ignore areas
-- Records the camera stream as-is (no re-encoding) by default; optional transcoding uses the Pi GPU (`h264_v4l2m2m`) on Pi 3B+/4
-- Playback timeline with recorded coverage and motion events (kept in SQLite)
-- Installable mobile-first PWA
+It records RTSP cameras to disk: all the time, on a weekly schedule, or when something moves.
 
-## Run
+## Install
+
+On the Pi, as the `pi` user:
 
 ```sh
-docker compose up -d
+bash install.sh
 ```
 
-Open `http://<pi-ip>:8080` and use "Add to Home Screen". See [docker-compose.yml](docker-compose.yml): set `PUID`, `PGID`, the config directory and the recordings directory.
+This installs Docker and Portainer if they're missing, creates `/home/pi/AppData/config` and `/home/pi/AppData/recordings`, and starts Vigil on port 8080. Open `http://<pi-ip>:8080` and create the first account.
 
-## Releases
+To put recordings on a USB drive, or move the folders:
 
-Publishing a GitHub release (e.g. `v0.1.0`) builds and pushes `ghcr.io/thatguy-za/vigil:0.1.0` and `:latest`.
+```sh
+RECORDINGS=/mnt/ssd/recordings bash install.sh
+APPDATA=/somewhere/else bash install.sh
+```
+
+Already running Docker? Edit `PUID`, `PGID`, `TZ` and the two folders in `docker-compose.yml`, then `docker compose up -d`. Delete the `devices:` lines on a Pi 5.
+
+## Adding a camera
+
+Enter the camera's address, username and password. Vigil checks for ONVIF first, then tries the stream paths used by Hikvision, Dahua/Amcrest, Reolink, Tapo, Foscam, Axis and a few generic ones. It fills in the main stream and, if there is one, the sub-stream. If nothing matches, paste the RTSP URLs yourself.
+
+ONVIF cameras on the same network also show up on the home page by themselves.
+
+## How it records
+
+- **Copy, don't transcode.** The camera's stream is written to 5-minute MP4 segments as it arrives, so the CPU does almost nothing. Transcoding is an option per camera: it uses the GPU encoder (`h264_v4l2m2m`) on a Pi 3B+ or 4, and the CPU on a Pi 5, which has no H.264 encoder.
+- **Motion.** Frames from the sub-stream are compared against a running background. A clip runs from 5 s before the first movement to 10 s after the last, capped at 5 minutes. You can paint zones to ignore on a 16×9 grid.
+- **Retention.** Per camera, in days (0 keeps everything). Whatever the setting, the oldest recordings are deleted if free space drops below 5%.
+
+A rough guide, not a benchmark:
+
+| Board | Cameras in copy mode | Transcoded streams |
+|---|---|---|
+| Pi 3B+ | about 4 | 1, on the GPU |
+| Pi 4 | about 8 | 2, on the GPU |
+| Pi 5 | about 12 | 1, on the CPU |
+
+Use a USB SSD for recordings, not the SD card.
 
 ## Users
 
-The first time you open Vigil you create the admin account. Admins can add more users from the menu: **Admins** manage everything, **Viewers** can only watch live view and recordings (they never see camera passwords). Passwords are stored as argon2id hashes, and failed logins are rate-limited.
+The first account is an admin. Admins can add more users from the menu. Viewers can watch live video and recordings, and never see camera passwords. Passwords are hashed with argon2id.
 
-Locked out? Reset a password from the Pi:
+If you're locked out, reset a password on the Pi:
 
 ```sh
 docker exec -it vigil /entrypoint.sh reset-password <username>
 ```
 
-## Notes
+## Not done
 
-Vigil serves plain HTTP. For access outside your LAN, put it behind a VPN or an HTTPS reverse proxy.
+- HTTPS. Vigil serves plain HTTP, so keep it on your LAN or put it behind a VPN or an HTTPS proxy.
+- Live view is a snapshot every couple of seconds, not video.
+- No push notifications, PTZ, or per-camera permissions.
+- Auto-discovery only finds ONVIF cameras.
+
+## Releases
+
+Publishing a GitHub release builds the arm64 image and pushes it to `ghcr.io/thatguy-za/vigil` with the version tag and `latest`.
+
+`tools/fakeonvif` is a fake ONVIF camera for testing discovery without hardware.
+
+## License
+
+GNU General Public License v3. See [LICENSE](LICENSE).

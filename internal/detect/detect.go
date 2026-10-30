@@ -19,8 +19,8 @@ import (
 
 var (
 	ErrAuth        = onvif.ErrAuth
-	ErrUnreachable = errors.New("could not reach the camera. Check the address and that it is powered on and on the same network")
-	ErrNotFound    = errors.New("the camera answered but none of the usual stream addresses worked. Enter the stream URL manually")
+	ErrUnreachable = errors.New("Can't reach the camera at that address")
+	ErrNotFound    = errors.New("The camera is reachable but none of the usual stream addresses worked. Enter the URLs by hand.")
 )
 
 type Result struct {
@@ -62,19 +62,19 @@ var patterns = []pattern{
 func ParseHost(in string) (host, port string, err error) {
 	in = strings.TrimSpace(in)
 	if in == "" {
-		return "", "", errors.New("enter the camera's IP address")
+		return "", "", errors.New("Enter the camera's address")
 	}
 	if !strings.Contains(in, "://") {
 		in = "rtsp://" + in
 	}
 	u, err := url.Parse(in)
 	if err != nil || u.Hostname() == "" {
-		return "", "", errors.New("that doesn't look like an IP address or hostname")
+		return "", "", errors.New("That isn't a valid IP address or hostname")
 	}
 	host, port = u.Hostname(), u.Port()
 	for _, r := range host {
 		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-' || r == ':') {
-			return "", "", errors.New("that doesn't look like an IP address or hostname")
+			return "", "", errors.New("That isn't a valid IP address or hostname")
 		}
 	}
 	if port == "" {
@@ -98,7 +98,7 @@ func Detect(ctx context.Context, req Request, progress func(string)) (Result, er
 	sawAuth := false
 
 	// 1. ONVIF gives both streams and their resolutions in one go.
-	say("Looking for the camera at " + host + "…")
+	say("Checking " + host + " for ONVIF")
 	xaddrs := onvif.FindDevice(ctx, host, onvif.DefaultPorts)
 	if req.XAddr != "" {
 		xaddrs = append([]string{req.XAddr}, xaddrs...)
@@ -109,22 +109,22 @@ func Detect(ctx context.Context, req Request, progress func(string)) (Result, er
 			continue
 		}
 		seen[x] = true
-		say("Camera found. Signing in with ONVIF…")
+		say("Signing in over ONVIF")
 		st, err := onvif.ResolveInfo(ctx, x, req.User, req.Pass)
 		if err == nil {
 			return Result{URL: st.Main, SubURL: st.Sub, Method: "onvif", Info: st.MainRes, SubInfo: st.SubRes}, nil
 		}
 		if errors.Is(err, ErrAuth) {
 			sawAuth = true
-			say("The camera rejected that username or password over ONVIF. Trying other ways in…")
+			say("ONVIF login rejected, trying stream addresses")
 		}
 	}
 	if len(xaddrs) == 0 {
-		say("No ONVIF service found. Trying the stream addresses cameras commonly use…")
+		say("No ONVIF, trying common stream addresses")
 	}
 
 	// 2. Brand-specific RTSP paths.
-	say("Connecting to the camera's video port (" + port + ")…")
+	say("Connecting to port " + port)
 	c, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 3*time.Second)
 	if err != nil {
 		if sawAuth {
@@ -157,7 +157,7 @@ func Detect(ctx context.Context, req Request, progress func(string)) (Result, er
 		if len(names) == 0 {
 			names = []string{"generic"}
 		}
-		say("Trying " + strings.Join(names, ", ") + " addresses…")
+		say("Trying " + strings.Join(names, ", "))
 		var wg sync.WaitGroup
 		for i := start; i < start+batch && i < len(patterns); i++ {
 			wg.Add(1)
@@ -170,7 +170,7 @@ func Detect(ctx context.Context, req Request, progress func(string)) (Result, er
 		wg.Wait()
 		for i := start; i < start+batch && i < len(patterns); i++ {
 			if results[i].ok {
-				say("Stream found. Checking for a lower-resolution sub-stream…")
+				say("Looking for a sub-stream")
 				r := Result{URL: mk(patterns[i].main), Method: "pattern", Info: results[i].info}
 				if p := patterns[i].sub; p != "" {
 					if info, _, ok := probeRTSP(ctx, mk(p)); ok {
