@@ -17,6 +17,11 @@ import (
 
 const rtsp = "rtsp://vigil-demo-mtx:8554/cam"
 
+// The camera reports motion for 15 s of every minute, whatever the picture does.
+var lastSent bool
+
+func motionNow() bool { s := time.Now().Unix() % 60; return s >= 30 && s < 45 }
+
 func main() {
 	group, _ := net.ResolveUDPAddr("udp4", "239.255.255.250:3702")
 	conn, err := net.ListenMulticastUDP("udp4", nil, group)
@@ -65,6 +70,22 @@ func main() {
 			return
 		}
 		switch {
+		case strings.Contains(body, "GetCapabilities") && strings.Contains(body, "<Category>Events"):
+			out(`<GetCapabilitiesResponse><Capabilities><Events><XAddr>http://127.0.0.1:8000/onvif/events</XAddr></Events></Capabilities></GetCapabilitiesResponse>`)
+		case strings.Contains(body, "CreatePullPointSubscription"):
+			out(`<CreatePullPointSubscriptionResponse><SubscriptionReference><Address>http://127.0.0.1:8000/onvif/pull</Address></SubscriptionReference></CreatePullPointSubscriptionResponse>`)
+		case strings.Contains(body, "PullMessages"):
+			// Wait up to 4 s for motion to start or stop, then report the change.
+			for end := time.Now().Add(4 * time.Second); time.Now().Before(end); time.Sleep(200 * time.Millisecond) {
+				if cur := motionNow(); cur != lastSent {
+					lastSent = cur
+					out(fmt.Sprintf(`<PullMessagesResponse><wsnt:NotificationMessage xmlns:wsnt="x"><wsnt:Topic>tns1:RuleEngine/CellMotionDetector/Motion</wsnt:Topic><wsnt:Message><tt:Message xmlns:tt="y"><tt:Data><tt:SimpleItem Name="IsMotion" Value="%v"/></tt:Data></tt:Message></wsnt:Message></wsnt:NotificationMessage></PullMessagesResponse>`, cur))
+					return
+				}
+			}
+			out(`<PullMessagesResponse/>`)
+		case strings.Contains(body, "Renew") || strings.Contains(body, "Unsubscribe"):
+			out(`<ok/>`)
 		case strings.Contains(body, "GetCapabilities"):
 			out(`<GetCapabilitiesResponse><Capabilities><Media><XAddr>http://127.0.0.1:8000/onvif/media</XAddr></Media></Capabilities></GetCapabilitiesResponse>`)
 		case strings.Contains(body, "GetProfiles"):

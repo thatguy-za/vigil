@@ -176,3 +176,27 @@ body.viewer [data-admin]{display:none!important}
 .tl-top,.tl-bot{z-index:2;pointer-events:none}
 .tedit{pointer-events:auto;color:#f2f2f2;font-size:12px;padding:3px 9px;border:1px solid #fff5;border-radius:4px;background:#0006;text-decoration:none}
 .evnav .btn{flex:1}
+
+.hrow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid var(--line)}.hrow:first-child{border-top:0}
+.hev{display:flex;gap:10px;padding:8px 12px;border-top:1px solid var(--line);font-size:13px}.hev:first-child{border-top:0}
+.hev>span:first-child{flex:0 0 auto;font-size:12px}
+dd.bad,.bad{color:var(--bad)}
+
+.warn{border:1px solid var(--line);border-left:3px solid var(--acc);padding:10px 12px;margin-bottom:12px;border-radius:var(--r);font-size:14px}
+.tl i.cv.prot{outline:1px solid var(--acc);outline-offset:-1px}
+
+.sched div.mo{background:repeating-linear-gradient(135deg,var(--acc) 0 3px,transparent 3px 6px);outline:1px solid var(--acc);outline-offset:-1px}
+.key.sw1{background:var(--acc);border:0}.key.sw2{background:repeating-linear-gradient(135deg,var(--acc) 0 2px,transparent 2px 4px);border:1px solid var(--acc)}
+.tl i.cv.low{background:var(--line);opacity:.7;top:34%;bottom:34%}
+.zrow{display:flex;gap:6px;margin-top:10px}.zrow .seg{flex:1}.zrow .pan{width:44px;padding:0;font-size:20px}
+.thumbs{display:flex;gap:6px;overflow-x:auto;margin-top:12px;scrollbar-width:none}.thumbs::-webkit-scrollbar{display:none}
+.thumbs button{flex:0 0 auto;width:112px;padding:0;min-height:0;display:block;text-align:left;overflow:hidden}
+.thumbs img{display:block;width:112px;height:63px;object-fit:cover;background:#000}
+.thumbs span{display:block;font-size:11px;padding:3px 6px;color:var(--mut)}
+.calhead{display:flex;justify-content:space-between;align-items:center;margin:8px 0}.calhead button{width:44px;padding:0;font-size:20px}
+.calgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
+.calgrid .dow{text-align:center;font-size:11px;color:var(--mut);padding:4px 0}
+.day{height:42px;min-height:42px;display:grid;place-items:center;border-radius:4px;color:var(--mut);padding:0;font-size:14px}
+button.day.has{color:var(--fg);border:1px solid var(--acc);font-weight:600}
+button.day.sel{background:var(--acc);color:var(--accfg)}
+#datebtn{flex:1}

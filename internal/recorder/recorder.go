@@ -3,6 +3,7 @@
 package recorder
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"fmt"
@@ -24,6 +25,7 @@ const SegmentSeconds = 300
 type Status struct {
 	State string `json:"state"` // off | idle | connecting | recording | error
 	Error string `json:"error,omitempty"`
+	Note  string `json:"note,omitempty"` // a warning that doesn't stop recording
 }
 
 type job struct {
@@ -34,8 +36,21 @@ type job struct {
 	running   bool
 	startedAt time.Time
 	lastErr   string
+	mode      string // what this run is doing now: continuous or motion
+	note      string
 	noHW      bool // hardware decode failed once; use software for motion analysis
 	motion    bool // an event is being recorded
+
+	lastData  time.Time          // when output or frames last arrived from the camera
+	health    string             // "", "up" or "down": what was last reported
+	stalled   bool               // the watchdog killed ffmpeg for not producing data
+	cancelRun context.CancelFunc // stops the current ffmpeg run only
+}
+
+func (j *job) touch() {
+	j.mu.Lock()
+	j.lastData = time.Now()
+	j.mu.Unlock()
 }
 
 type Manager struct {
@@ -78,15 +93,24 @@ func (m *Manager) Run(ctx context.Context) {
 	}
 }
 
-func wanted(c db.Camera, now time.Time) bool {
+// effective is what a camera should be doing right now: "continuous", "motion", or ""
+// for nothing. A schedule can switch between the two hour by hour.
+func effective(c db.Camera, now time.Time) string {
 	switch c.Mode {
 	case "continuous", "motion":
-		return true
+		return c.Mode
 	case "schedule":
-		i := int(now.Weekday())*24 + now.Hour()
-		return len(c.Schedule) == 168 && c.Schedule[i] == '1'
+		if len(c.Schedule) != 168 {
+			return ""
+		}
+		switch c.Schedule[int(now.Weekday())*24+now.Hour()] {
+		case '1':
+			return "continuous"
+		case '2':
+			return "motion"
+		}
 	}
-	return false
+	return ""
 }
 
 func (m *Manager) reconcile(ctx context.Context) {
@@ -98,18 +122,21 @@ func (m *Manager) reconcile(ctx context.Context) {
 	now := time.Now()
 	keep := map[int64]bool{}
 	for _, c := range cams {
-		sig := strings.Join(m.args(c), "\x00") + fmt.Sprint(c.MotionSensitivity) + c.MotionMask
+		eff := effective(c, now)
+		ec := c // the camera as it should run this hour
+		ec.Mode = eff
+		sig := strings.Join(m.args(ec), "\x00") + fmt.Sprint(c.MotionSensitivity) + c.MotionMask + c.MotionSource + c.OnvifURL
 		m.mu.Lock()
 		j := m.jobs[c.ID]
 		m.mu.Unlock()
-		if wanted(c, now) {
+		if eff != "" {
 			keep[c.ID] = true
 			if j != nil && j.sig != sig {
 				m.stop(c.ID)
 				j = nil
 			}
 			if j == nil {
-				m.start(ctx, c, sig)
+				m.start(ctx, ec, sig)
 			}
 		}
 	}
@@ -128,7 +155,7 @@ func (m *Manager) reconcile(ctx context.Context) {
 
 func (m *Manager) start(ctx context.Context, c db.Camera, sig string) {
 	cctx, cancel := context.WithCancel(ctx)
-	j := &job{sig: sig, cancel: cancel, done: make(chan struct{})}
+	j := &job{sig: sig, cancel: cancel, done: make(chan struct{}), mode: c.Mode}
 	m.mu.Lock()
 	m.jobs[c.ID] = j
 	m.mu.Unlock()
@@ -148,6 +175,12 @@ func (m *Manager) stop(id int64) {
 	select {
 	case <-j.done:
 	case <-time.After(15 * time.Second):
+	}
+	j.mu.Lock()
+	was := j.health
+	j.mu.Unlock()
+	if was != "" {
+		m.db.AddHealth(id, "stopped", "")
 	}
 	log.Printf("recorder: stopped id %d", id)
 }
@@ -176,49 +209,140 @@ func (m *Manager) Status(c db.Camera) Status {
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
+	st := Status{State: "error", Error: j.lastErr, Note: j.note}
 	switch {
-	case j.running && time.Since(j.startedAt) > 5*time.Second && c.Mode == "motion" && !j.motion:
-		return Status{State: "watching"}
-	case j.running && time.Since(j.startedAt) > 5*time.Second:
-		return Status{State: "recording"}
+	case j.running && j.health == "up" && j.mode == "motion" && !j.motion:
+		st.State, st.Error = "watching", ""
+	case j.running && j.health == "up":
+		st.State, st.Error = "recording", ""
+	case j.running && j.health == "down": // still retrying after an outage
 	case j.running:
-		return Status{State: "connecting"}
+		st.State, st.Error = "connecting", ""
 	}
-	return Status{State: "error", Error: j.lastErr}
+	return st
+}
+
+// LastData is when the camera last delivered anything, and whether it is being recorded at all.
+func (m *Manager) LastData(id int64) (time.Time, bool) {
+	m.mu.Lock()
+	j := m.jobs[id]
+	m.mu.Unlock()
+	if j == nil {
+		return time.Time{}, false
+	}
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.lastData, true
+}
+
+const (
+	stallAfter = 45 * time.Second // no data for this long and ffmpeg is restarted
+	watchEvery = 3 * time.Second
+)
+
+// setHealth records a change between up and down (once per change).
+func (m *Manager) setHealth(c db.Camera, j *job, to, detail string) {
+	j.mu.Lock()
+	if j.health == to {
+		j.mu.Unlock()
+		return
+	}
+	j.health = to
+	j.mu.Unlock()
+	kind := "online"
+	if to == "down" {
+		kind = "offline"
+	}
+	m.db.AddHealth(c.ID, kind, detail)
+}
+
+// watch marks the camera up once data arrives, and restarts ffmpeg if it hangs
+// (a dead RTSP connection can leave the process alive but silent forever).
+func (m *Manager) watch(ctx context.Context, c db.Camera, j *job) {
+	t := time.NewTicker(watchEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		j.mu.Lock()
+		running, started, last, cancel := j.running, j.startedAt, j.lastData, j.cancelRun
+		j.mu.Unlock()
+		if !running {
+			continue
+		}
+		ref := started
+		if last.After(started) {
+			ref = last
+			if time.Since(last) < stallAfter {
+				m.setHealth(c, j, "up", "")
+			}
+		}
+		if time.Since(ref) > stallAfter && cancel != nil {
+			log.Printf("recorder: %q sent no data for %s, restarting", c.Name, stallAfter)
+			j.mu.Lock()
+			j.stalled = true
+			j.mu.Unlock()
+			m.setHealth(c, j, "down", fmt.Sprintf("No data for %d s, restarted", int(stallAfter.Seconds())))
+			cancel()
+		}
+	}
 }
 
 func (m *Manager) loop(ctx context.Context, c db.Camera, j *job) {
 	defer close(j.done)
+	go m.watch(ctx, c, j)
 	backoff := 3 * time.Second
 	for ctx.Err() == nil {
 		os.MkdirAll(CameraDir(m.dir, c.ID), 0o755)
 		var tail tailBuf
+		rctx, rcancel := context.WithCancel(ctx) // this run only; the watchdog can end it
 		j.mu.Lock()
-		j.running, j.startedAt = true, time.Now()
+		j.running, j.startedAt, j.cancelRun = true, time.Now(), rcancel
 		j.mu.Unlock()
 		start := time.Now()
 		var err error
 		if c.Mode == "motion" {
-			err = m.runMotion(ctx, c, j, &tail)
+			err = m.runMotion(rctx, c, j, &tail)
 		} else {
-			cmd := exec.CommandContext(ctx, "ffmpeg", m.args(c)...)
+			cmd := exec.CommandContext(rctx, "ffmpeg", m.args(c)...)
 			cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 			cmd.WaitDelay = 8 * time.Second
 			cmd.Stderr = &tail
+			// -progress prints a line block every ~0.5 s while data flows; silence means a stall
+			if out, perr := cmd.StdoutPipe(); perr == nil {
+				go func() {
+					sc := bufio.NewScanner(out)
+					for sc.Scan() {
+						j.touch()
+					}
+				}()
+			}
 			err = cmd.Run()
 		}
+		rcancel()
 		j.mu.Lock()
 		j.running = false
+		stalled := j.stalled
+		j.stalled = false
+		msg := ""
 		if ctx.Err() == nil {
-			j.lastErr = tail.last()
-			if j.lastErr == "" && err != nil {
-				j.lastErr = redact(err.Error())
+			msg = tail.last()
+			if msg == "" && err != nil {
+				msg = redact(err.Error())
 			}
+			if stalled {
+				msg = fmt.Sprintf("No data for %d s, restarted", int(stallAfter.Seconds()))
+			}
+			j.lastErr = msg
 		}
 		j.mu.Unlock()
 		if ctx.Err() != nil {
 			return
 		}
+		m.setHealth(c, j, "down", msg)
 		if time.Since(start) > time.Minute {
 			backoff = 3 * time.Second
 		}
@@ -239,7 +363,7 @@ func (m *Manager) args(c db.Camera) []string {
 	if c.Mode == "motion" {
 		return m.motionArgs(c, m.hwDec)
 	}
-	a := []string{"-hide_banner", "-loglevel", "warning", "-nostdin",
+	a := []string{"-hide_banner", "-loglevel", "warning", "-nostdin", "-progress", "pipe:1", "-nostats",
 		"-rtsp_transport", "tcp", "-i", c.URL, "-map", "0:v:0"}
 	a = append(a, m.codecArgs(c)...)
 	return append(a, "-f", "segment", "-segment_time", fmt.Sprint(SegmentSeconds),

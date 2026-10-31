@@ -25,6 +25,7 @@ import (
 	"github.com/thatguy-za/vigil/internal/onvif"
 	"github.com/thatguy-za/vigil/internal/recorder"
 	"github.com/thatguy-za/vigil/internal/storage"
+	"github.com/thatguy-za/vigil/internal/sysinfo"
 	"github.com/thatguy-za/vigil/web"
 )
 
@@ -62,6 +63,12 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("PUT /api/users/{id}", admin(s.updateUser))
 	m.HandleFunc("DELETE /api/users/{id}", admin(s.deleteUser))
 	m.HandleFunc("GET /api/system", admin(s.system))
+	m.HandleFunc("GET /api/health", admin(s.health))
+	m.HandleFunc("GET /api/storage", admin(s.storageInfo))
+	m.HandleFunc("GET /api/settings", admin(s.getSettings))
+	m.HandleFunc("PUT /api/settings", admin(s.putSettings))
+	m.HandleFunc("POST /api/cameras/{id}/clips/{name}/protect", admin(s.protectClip))
+	m.HandleFunc("DELETE /api/cameras/{id}/clips/{name}", admin(s.deleteClip))
 	m.HandleFunc("GET /api/cameras", user(s.list))
 	m.HandleFunc("POST /api/cameras", admin(s.save))
 	m.HandleFunc("POST /api/cameras/test", admin(s.test))
@@ -71,6 +78,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("DELETE /api/cameras/{id}", admin(s.remove))
 	m.HandleFunc("GET /api/cameras/{id}/snapshot", user(s.snapshot))
 	m.HandleFunc("GET /api/cameras/{id}/live.mp4", user(s.liveVideo))
+	m.HandleFunc("GET /api/cameras/{id}/thumb", user(s.thumb))
 	m.HandleFunc("GET /api/cameras/{id}/recordings", user(s.recordings))
 	m.HandleFunc("GET /api/cameras/{id}/events", user(s.events))
 	m.HandleFunc("GET /api/discovery", admin(s.discovered))
@@ -132,8 +140,8 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	scheduleRe = regexp.MustCompile(`^[01]{168}$`)
-	maskRe     = regexp.MustCompile(`^[01]{144}$`) // motion.MaskCols * motion.MaskRows
+	scheduleRe = regexp.MustCompile(`^[012]{168}$`) // per hour: 0 off, 1 always, 2 motion
+	maskRe     = regexp.MustCompile(`^[01]{144}$`)  // motion.MaskCols * motion.MaskRows
 )
 
 func validURL(u string, optional bool) bool {
@@ -167,6 +175,18 @@ func (s *Server) save(w http.ResponseWriter, r *http.Request) {
 	case c.Mode == "schedule" && !scheduleRe.MatchString(c.Schedule):
 		fail(w, 400, "invalid schedule")
 		return
+	case c.MaxGB < 0 || c.MaxGB > 100000:
+		fail(w, 400, "size limit out of range")
+		return
+	case c.LowRes && c.SubURL == "":
+		fail(w, 400, "Low-res recording needs a sub-stream URL")
+		return
+	case c.MotionSource != "" && c.MotionSource != "vigil" && c.MotionSource != "camera" && c.MotionSource != "both":
+		fail(w, 400, "invalid motion source")
+		return
+	case !validURL(c.OnvifURL, true):
+		fail(w, 400, "ONVIF address must start with http://")
+		return
 	case c.MotionMask != "" && !maskRe.MatchString(c.MotionMask):
 		fail(w, 400, "invalid motion mask")
 		return
@@ -179,6 +199,9 @@ func (s *Server) save(w http.ResponseWriter, r *http.Request) {
 	}
 	if c.MotionSensitivity == 0 {
 		c.MotionSensitivity = 5
+	}
+	if c.MotionSource == "" {
+		c.MotionSource = "vigil"
 	}
 	if r.Method == http.MethodPut {
 		c.ID, _ = strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -265,11 +288,13 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 }
 
 type clip struct {
-	Path  string    `json:"path"`
-	Start time.Time `json:"start"`
-	Bytes int64     `json:"bytes"`
-	Live  bool      `json:"live"`
-	Dur   float64   `json:"duration"` // seconds
+	Path      string    `json:"path"`
+	Start     time.Time `json:"start"`
+	Bytes     int64     `json:"bytes"`
+	Live      bool      `json:"live"`
+	Dur       float64   `json:"duration"` // seconds
+	Protected bool      `json:"protected"`
+	Low       bool      `json:"low"` // from the continuous low-res track
 }
 
 var clipRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})_(\d{2}-\d{2}-\d{2})\.mp4$`)
@@ -289,10 +314,24 @@ func (s *Server) recordings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	prot := s.DB.ProtectedClips(c.ID)
 	seen := map[string]bool{}
 	dates := []string{}
 	byDate := map[string][]clip{}
+	type entry struct {
+		f   os.DirEntry
+		low bool // from the sub-stream's continuous low-res track
+	}
+	var ents []entry
 	for _, f := range files {
+		ents = append(ents, entry{f, false})
+	}
+	lowFiles, _ := os.ReadDir(filepath.Join(dir, "low"))
+	for _, f := range lowFiles {
+		ents = append(ents, entry{f, true})
+	}
+	for _, e := range ents {
+		f := e.f
 		m := clipRe.FindStringSubmatch(f.Name())
 		info, err := f.Info()
 		if m == nil || err != nil {
@@ -307,7 +346,10 @@ func (s *Server) recordings(w http.ResponseWriter, r *http.Request) {
 			dates = append(dates, m[1])
 		}
 		live := time.Since(info.ModTime()) < 30*time.Second
-		dur := durs[f.Name()]
+		dur := 0.0
+		if !e.low {
+			dur = durs[f.Name()]
+		}
 		if dur == 0 {
 			dur = recorder.SegmentSeconds
 			if live {
@@ -315,8 +357,8 @@ func (s *Server) recordings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		byDate[m[1]] = append(byDate[m[1]], clip{
-			Path:  "/files/" + filepath.Base(dir) + "/" + f.Name(),
-			Start: t, Bytes: info.Size(), Live: live, Dur: dur,
+			Path:  "/files/" + filepath.Base(dir) + "/" + map[bool]string{false: "", true: "low/"}[e.low] + f.Name(),
+			Start: t, Bytes: info.Size(), Live: live, Dur: dur, Protected: !e.low && prot[f.Name()], Low: e.low,
 		})
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(dates)))
@@ -337,6 +379,17 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasSuffix(rel, ".mp4") {
 		http.NotFound(w, r)
 		return
+	}
+	if r.URL.Query().Get("download") == "1" {
+		name := filepath.Base(rel)
+		if parts := strings.Split(strings.TrimPrefix(rel, "/"), "/"); len(parts) > 1 && strings.HasPrefix(parts[0], "cam") {
+			if id, err := strconv.ParseInt(parts[0][3:], 10, 64); err == nil {
+				if c, err := s.DB.Camera(id); err == nil {
+					name = slug(c.Name) + "_" + name
+				}
+			}
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	}
 	http.ServeFile(w, r, filepath.Join(s.RecDir, rel))
 }
@@ -524,4 +577,65 @@ func (s *Server) liveVideo(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+type camHealth struct {
+	ID           int64    `json:"id"`
+	Name         string   `json:"name"`
+	Mode         string   `json:"mode"`
+	State        string   `json:"state"`
+	Error        string   `json:"error,omitempty"`
+	LastDataAgeS *float64 `json:"last_data_age_s"` // nil when the camera isn't being recorded
+	Restarts24h  int      `json:"restarts_24h"`
+	UptimePct    *float64 `json:"uptime_pct_24h"` // nil if it wasn't monitored in the last 24 h
+}
+
+type healthEvent struct {
+	Time   time.Time `json:"time"`
+	Camera string    `json:"camera"`
+	Kind   string    `json:"kind"`
+	Detail string    `json:"detail"`
+}
+
+// health reports the Pi's condition, each camera's recent reliability, and recent events.
+func (s *Server) health(w http.ResponseWriter, r *http.Request) {
+	cams, err := s.DB.Cameras()
+	if err != nil {
+		fail(w, 500, err.Error())
+		return
+	}
+	now := time.Now()
+	evs, _ := s.DB.HealthSince(now.Add(-7 * 24 * time.Hour))
+	names := map[int64]string{}
+	out := make([]camHealth, len(cams))
+	for i, c := range cams {
+		names[c.ID] = c.Name
+		st := s.Rec.Status(c)
+		h := camHealth{ID: c.ID, Name: c.Name, Mode: c.Mode, State: st.State, Error: st.Error}
+		if last, ok := s.Rec.LastData(c.ID); ok && !last.IsZero() {
+			a := now.Sub(last).Seconds()
+			h.LastDataAgeS = &a
+		}
+		from := now.Add(-24 * time.Hour)
+		var mine []db.HealthEvent
+		for _, e := range evs {
+			if e.CameraID == c.ID {
+				mine = append(mine, e)
+				if e.Kind == "offline" && e.Time.After(from) {
+					h.Restarts24h++
+				}
+			}
+		}
+		if p := db.UptimePct(s.DB.HealthKindBefore(c.ID, from), mine, from, now); p >= 0 {
+			h.UptimePct = &p
+		}
+		out[i] = h
+	}
+	recent := []healthEvent{}
+	for i := len(evs) - 1; i >= 0 && len(recent) < 30; i-- {
+		if n, ok := names[evs[i].CameraID]; ok {
+			recent = append(recent, healthEvent{evs[i].Time, n, evs[i].Kind, evs[i].Detail})
+		}
+	}
+	jsonOut(w, 200, map[string]any{"pi": sysinfo.Read(), "cameras": out, "events": recent})
 }

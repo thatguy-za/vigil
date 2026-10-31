@@ -24,11 +24,12 @@ var (
 )
 
 type Result struct {
-	URL     string `json:"url"`
-	SubURL  string `json:"sub_url"`
-	Method  string `json:"method"` // onvif | pattern
-	Info    string `json:"main_info"`
-	SubInfo string `json:"sub_info"`
+	URL      string `json:"url"`
+	SubURL   string `json:"sub_url"`
+	Method   string `json:"method"`              // onvif | pattern
+	OnvifURL string `json:"onvif_url,omitempty"` // the camera's ONVIF device service, when found
+	Info     string `json:"main_info"`
+	SubInfo  string `json:"sub_info"`
 }
 
 type Request struct {
@@ -112,7 +113,7 @@ func Detect(ctx context.Context, req Request, progress func(string)) (Result, er
 		say("Signing in over ONVIF")
 		st, err := onvif.ResolveInfo(ctx, x, req.User, req.Pass)
 		if err == nil {
-			return Result{URL: st.Main, SubURL: st.Sub, Method: "onvif", Info: st.MainRes, SubInfo: st.SubRes}, nil
+			return Result{URL: st.Main, SubURL: st.Sub, Method: "onvif", Info: st.MainRes, SubInfo: st.SubRes, OnvifURL: x}, nil
 		}
 		if errors.Is(err, ErrAuth) {
 			sawAuth = true

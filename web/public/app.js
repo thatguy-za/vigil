@@ -52,7 +52,7 @@ document.addEventListener('keydown', e => {
 $('#logout').onclick = () => { closeDrawer(); signOut(); };
 
 const MODES = { off: 'Off', continuous: '24x7', schedule: 'Schedule', motion: 'Motion' };
-const pill = s => `<span class="pill ${s.state}">${{ recording: 'Recording', watching: 'Watching', connecting: 'Connecting', error: 'Error', off: 'Off', idle: 'Idle' }[s.state]}</span>`;
+const pill = s => `<span class="pill ${s.state}">${{ recording: 'Recording', watching: 'Watching', connecting: 'Connecting', error: 'Offline', off: 'Off', idle: 'Idle' }[s.state]}</span>`;
 const fmtBytes = b => b > 2 ** 30 ? (b / 2 ** 30).toFixed(1) + ' GB' : b > 2 ** 20 ? (b / 2 ** 20).toFixed(0) + ' MB' : Math.round(b / 1024) + ' KB';
 const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
@@ -160,6 +160,7 @@ async function camerasView() {
         <div class="tl-bot"><span>${esc(c.name)}</span><span class="mono">${MODES[c.mode]}${c.transcode ? ', transcoded' : ''}</span></div>
       </div>
       ${c.status.state === 'error' ? `<div class="tile-err err">${esc(c.status.error)}</div>` : ''}
+      ${c.status.note ? `<div class="tile-err sub">${esc(c.status.note)}</div>` : ''}
     </div>`).join('')}</div>`;
   const imgs = [...view.querySelectorAll('img')];
   const refresh = () => imgs.forEach(img => {
@@ -199,11 +200,12 @@ async function liveView(id) {
 // ---------- Add / edit camera ----------
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
 // Tap/drag painting for a grid of cells with data-i; arr holds '0'/'1' per index.
-function paintGrid(g, arr) {
+function paintGrid(g, arr, brush) {
   let paint = null;
   const cell = (x, y) => { const el = document.elementFromPoint(x, y); return el && g.contains(el) && el.dataset.i !== undefined ? el : null; };
-  const set = el => { if (el && paint !== null) { arr[el.dataset.i] = paint ? '1' : '0'; el.classList.toggle('on', paint); } };
-  g.onpointerdown = e => { const el = cell(e.clientX, e.clientY); if (el) { paint = arr[el.dataset.i] !== '1'; set(el); g.setPointerCapture(e.pointerId); } };
+  const val = () => brush ? brush() : '1';
+  const set = el => { if (el && paint !== null) { arr[el.dataset.i] = paint; el.className = paint === '1' ? 'on' : paint === '2' ? 'mo' : ''; } };
+  g.onpointerdown = e => { const el = cell(e.clientX, e.clientY); if (el) { paint = arr[el.dataset.i] === val() ? '0' : val(); set(el); g.setPointerCapture(e.pointerId); } };
   g.onpointermove = e => set(cell(e.clientX, e.clientY));
   g.onpointerup = g.onpointercancel = () => paint = null;
 }
@@ -218,8 +220,8 @@ let foundSel = null;        // device picked from "Found on your network"
 // Editing an existing camera shows step 2 only.
 async function cameraForm(id, preselect) {
   linkedDiscovery = null; foundSel = null;
-  const [sys, existing] = await Promise.all([api('/system'), id ? api('/cameras/' + id) : null]);
-  const c = existing || { name: '', url: '', sub_url: '', mode: 'continuous', schedule: '0'.repeat(168), transcode: false, max_height: 720, audio: false, retention_days: 14, motion_mask: '' };
+  const [sys, existing, cfg] = await Promise.all([api('/system'), id ? api('/cameras/' + id) : null, api('/settings')]);
+  const c = existing || { name: '', url: '', sub_url: '', mode: 'continuous', schedule: '0'.repeat(168), transcode: false, max_height: 720, audio: false, retention_days: cfg.default_retention_days, motion_mask: '' };
   if (c.schedule.length !== 168) c.schedule = '0'.repeat(168);
   const enc = sys.hw.encoder;
   sheet(id ? 'Edit camera' : 'Add camera', `
@@ -255,12 +257,20 @@ async function cameraForm(id, preselect) {
         `<button type="button" data-m="${m}" class="${c.mode === m ? 'on' : ''}">${MODES[m]}</button>`).join('')}</div>
       <div id="sched" hidden></div>
       <div id="motion" hidden>
+        <label>Motion source</label>
+        <div class="seg" id="msrc">${[['vigil', 'Vigil'], ['camera', 'Camera'], ['both', 'Both']].map(([v, l]) => `<button type="button" data-s="${v}" class="${(c.motion_source || 'vigil') === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+        <div class="sub" id="msrchelp" style="margin-top:6px"></div>
+        <div id="onvifbox" hidden><label for="onvif">ONVIF address <small>optional, found automatically</small></label>
+          <input id="onvif" type="url" value="${esc(c.onvif_url || '')}" placeholder="http://192.168.1.20/onvif/device_service" inputmode="url" autocapitalize="off"></div>
+        <div id="analysis">
         <label for="sens">Sensitivity <small>higher picks up smaller movement</small></label>
         <input id="sens" type="range" min="1" max="10" value="${c.motion_sensitivity || 5}" style="width:100%">
         <label>Ignore zones <small>paint over trees, timestamps, roads</small></label>
         <div class="maskbox"><img id="maskimg" alt=""><div class="mask" id="mask">${Array.from({ length: MASK_CELLS }, (_, i) => `<div data-i="${i}"></div>`).join('')}</div></div>
         <div class="actions" style="margin-top:8px"><button type="button" id="maskclr">Clear</button></div>
         <div class="sub" style="margin-top:8px">Analysis runs on the ${sys.hw.hw_decode ? 'GPU' : 'CPU'}; a sub-stream makes it much cheaper. Clips run from 5 s before to 10 s after the motion.</div>
+        </div>
+        <div class="sw"><span>Also record the sub-stream all the time<small>Low-resolution video between motion clips. Needs a sub-stream.</small></span><input id="lowres" type="checkbox" ${c.low_res ? 'checked' : ''}></div>
       </div>
       <div class="sw"><span>Record audio<small>Saved as AAC.</small></span><input id="audio" type="checkbox" ${c.audio ? 'checked' : ''}></div>
       <div class="sw"><span>Transcode video<small>Off: the camera's stream is saved as is, which is cheapest. On: re-encode to H.264 on the ${enc.hardware ? 'GPU' : 'CPU'} (${esc(enc.name)}).</small></span><input id="tc" type="checkbox" ${c.transcode ? 'checked' : ''}></div>
@@ -268,13 +278,16 @@ async function cameraForm(id, preselect) {
         <select id="mh">${[480, 720, 1080].map(h => `<option ${c.max_height === h ? 'selected' : ''}>${h}</option>`).join('')}</select></div>
       <label for="ret">Keep recordings for <small>(Days. 0 = disabled)</small></label>
       <input id="ret" type="number" min="0" max="3650" value="${c.retention_days}" inputmode="numeric">
+      <label for="gb">Size limit <small>(GB. 0 = disabled)</small></label>
+      <input id="gb" type="number" min="0" value="${c.max_gb || 0}" inputmode="numeric">
       <div id="err" class="err"></div>
       <div class="actions">${id ? '' : '<button type="button" id="back">Back</button>'}<button class="pri" id="save" type="submit">Save</button>${id ? '<button type="button" class="del" id="del">Delete</button>' : ''}</div>
     </div>
   </form>`);
 
   // ----- step 2 controls -----
-  let mode = c.mode, sched = c.schedule.split('');
+  let mode = c.mode, sched = c.schedule.split(''), msrc = c.motion_source || 'vigil', brush = '1';
+  const SRCHELP = { vigil: 'Vigil compares frames from the video. Uses some CPU.', camera: 'The camera reports motion over ONVIF and Vigil analyses nothing. The cheapest option.', both: 'Either one starts a clip.' };
   const mask = (c.motion_mask?.length === MASK_CELLS ? c.motion_mask : '0'.repeat(MASK_CELLS)).split('');
   const drawMask = () => $('#mask').childNodes.forEach((el, i) => el.classList.toggle('on', mask[i] === '1'));
   drawMask(); paintGrid($('#mask'), mask);
@@ -282,28 +295,38 @@ async function cameraForm(id, preselect) {
   if (id) $('#maskimg').src = `/api/cameras/${id}/snapshot?t=${Date.now()}`;
   const upd = () => {
     $('#sched').hidden = mode !== 'schedule';
-    $('#motion').hidden = mode !== 'motion';
+    $('#motion').hidden = !(mode === 'motion' || (mode === 'schedule' && sched.includes('2')));
+    $('#analysis').hidden = msrc === 'camera';
+    $('#onvifbox').hidden = msrc === 'vigil';
+    $('#msrchelp').textContent = SRCHELP[msrc];
+    document.querySelectorAll('#msrc button').forEach(b => b.classList.toggle('on', b.dataset.s === msrc));
     $('#tcopt').hidden = !$('#tc').checked;
     document.querySelectorAll('#mode button').forEach(b => b.classList.toggle('on', b.dataset.m === mode));
   };
   $('#mode').onclick = e => { const m = e.target.dataset?.m; if (m && !e.target.disabled) { mode = m; upd(); } };
   $('#tc').onchange = upd;
+  $('#msrc').onclick = e => { const v = e.target.dataset?.s; if (v) { msrc = v; upd(); } };
 
   // schedule painter: rows = hours, columns = Mon..Sun
   const sc = $('#sched');
+  const cls = v => v === '1' ? 'on' : v === '2' ? 'mo' : '';
   const drawSched = () => {
-    sc.innerHTML = `<div class="sub" style="margin-top:12px">Tap or drag to choose the hours to record.</div>
-    <div class="chips" style="margin-top:8px">
-      <button type="button" data-p="all">All day</button><button type="button" data-p="night">Nights</button>
-      <button type="button" data-p="work">Work hours</button><button type="button" data-p="none">Clear</button></div>
+    sc.innerHTML = `<div class="sub" style="margin-top:12px">Pick a brush, then tap or drag over the hours.</div>
+    <div class="seg" id="brush" style="margin-top:8px">${[['1', 'Always'], ['2', 'Motion'], ['0', 'Off']].map(([v, l]) => `<button type="button" data-b="${v}" class="${brush === v ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="chips" id="presets" style="margin-top:8px">
+      <button type="button" data-p="all">Always, all day</button><button type="button" data-p="motion">Motion, all day</button>
+      <button type="button" data-p="night">Motion at night</button><button type="button" data-p="none">Clear</button></div>
     <div class="sched" id="grid"><div class="h"></div>${DAYS.map(d => `<div class="h">${d}</div>`).join('')}
     ${Array.from({ length: 24 }, (_, h) => `<div class="h">${String(h).padStart(2, '0')}</div>` +
-      DAYS.map((_, col) => `<div data-i="${dow(col) * 24 + h}" class="${sched[dow(col) * 24 + h] === '1' ? 'on' : ''}"></div>`).join('')).join('')}</div>`;
-    paintGrid($('#grid'), sched);
-    sc.querySelector('.chips').onclick = e => {
+      DAYS.map((_, col) => `<div data-i="${dow(col) * 24 + h}" class="${cls(sched[dow(col) * 24 + h])}"></div>`).join('')).join('')}</div>
+    <div class="sub" style="margin-top:6px"><span class="key sw1"></span>always <span class="key sw2"></span>motion</div>`;
+    paintGrid($('#grid'), sched, () => brush);
+    $('#grid').addEventListener('pointerup', upd);
+    $('#brush').onclick = e => { const v = e.target.dataset?.b; if (v) { brush = v; document.querySelectorAll('#brush button').forEach(b => b.classList.toggle('on', b.dataset.b === v)); } };
+    $('#presets').onclick = e => {
       const p = e.target.dataset?.p; if (!p) return;
-      sched = sched.map((_, i) => { const h = i % 24; return p === 'all' ? '1' : p === 'night' ? (h >= 18 || h < 6 ? '1' : '0') : p === 'work' ? (h >= 8 && h < 18 ? '1' : '0') : '0'; });
-      drawSched();
+      sched = sched.map((_, i) => { const h = i % 24; return p === 'all' ? '1' : p === 'motion' ? '2' : p === 'night' ? (h >= 18 || h < 6 ? '2' : '1') : '0'; });
+      drawSched(); upd();
     };
   };
   drawSched(); upd();
@@ -378,7 +401,7 @@ async function cameraForm(id, preselect) {
         if (!final) throw new Error('The connection was interrupted. Try again.');
         if (final.error) throw new Error(final.error);
         const r = final.result;
-        $('#url').value = r.url; $('#sub').value = r.sub_url; $('#prev').innerHTML = '';
+        $('#url').value = r.url; $('#sub').value = r.sub_url; $('#onvif').value = r.onvif_url || ''; $('#prev').innerHTML = '';
         linkedDiscovery = foundSel && foundSel.host === host ? foundSel.id : null;
         const d = x => x ? ` (${x})` : '';
         draw('ok', `Main stream${d(r.main_info)}. ${r.sub_url ? 'Sub-stream' + d(r.sub_info) + '.' : 'No sub-stream.'}`);
@@ -400,7 +423,7 @@ async function cameraForm(id, preselect) {
     if (!$('#url').value.trim()) { $('#urls').open = true; return err('Main stream URL is required.'); }
     $('#save').disabled = true; $('#err').textContent = '';
     const body = { name: $('#name').value, url: $('#url').value, sub_url: $('#sub').value, mode, schedule: sched.join(''),
-      transcode: $('#tc').checked, max_height: +$('#mh').value, audio: $('#audio').checked, retention_days: +$('#ret').value || 0, motion_sensitivity: +$('#sens').value, motion_mask: mask.includes('1') ? mask.join('') : '' };
+      transcode: $('#tc').checked, max_height: +$('#mh').value, audio: $('#audio').checked, retention_days: +$('#ret').value || 0, max_gb: +$('#gb').value || 0, motion_source: msrc, onvif_url: $('#onvif').value.trim(), low_res: $('#lowres').checked, motion_sensitivity: +$('#sens').value, motion_mask: mask.includes('1') ? mask.join('') : '' };
     try { await api(id ? '/cameras/' + id : '/cameras' + (linkedDiscovery ? '?discovery=' + encodeURIComponent(linkedDiscovery) : ''), { method: id ? 'PUT' : 'POST', body }); location.hash = '#/'; }
     catch (e2) { err(e2.message); }
   };
@@ -443,8 +466,32 @@ async function foundSection(pre) {
 
 // ---------- Recordings ----------
 const fmtClock = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const fmtHM = ms => new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+const DAY = 864e5;
 
-// Camera selector, then the camera view (live or playback), then a timeline.
+// A month grid; days that have recordings are tappable.
+function calendarSheet(dates, selected, onPick) {
+  const have = new Set(dates);
+  let [y, mo] = (selected || dates[0] || new Date().toISOString().slice(0, 10)).split('-').map(Number);
+  mo -= 1;
+  sheet('Pick a day', '<div id="cal"></div>', closeSheets);
+  const draw = () => {
+    const first = new Date(y, mo, 1), n = new Date(y, mo + 1, 0).getDate(), lead = (first.getDay() + 6) % 7;
+    const cells = Array(lead).fill('<span></span>').concat(Array.from({ length: n }, (_, i) => {
+      const d = `${y}-${String(mo + 1).padStart(2, '0')}-${String(i + 1).padStart(2, '0')}`;
+      return have.has(d) ? `<button type="button" class="day has${d === selected ? ' sel' : ''}" data-d="${d}">${i + 1}</button>` : `<span class="day">${i + 1}</span>`;
+    }));
+    $('#cal').innerHTML = `<div class="calhead"><button type="button" id="cp" aria-label="Previous month">‹</button><b>${first.toLocaleString([], { month: 'long', year: 'numeric' })}</b><button type="button" id="cn" aria-label="Next month">›</button></div>
+      <div class="calgrid">${['M', 'T', 'W', 'T', 'F', 'S', 'S'].map(x => `<span class="dow">${x}</span>`).join('')}${cells.join('')}</div>
+      <div class="sub" style="margin-top:10px">Days with recordings are outlined.</div>`;
+    $('#cp').onclick = () => { if (--mo < 0) { mo = 11; y--; } draw(); };
+    $('#cn').onclick = () => { if (++mo > 11) { mo = 0; y++; } draw(); };
+  };
+  $('#cal').onclick = e => { const d = e.target.dataset?.d; if (d) { closeSheets(); onPick(d); } };
+  draw();
+}
+
+// Camera selector, then the camera view (live or playback), then a zoomable timeline.
 async function clipsView(camId, date) {
   const cams = await api('/cameras');
   if (!cams.length) { view.innerHTML = '<div class="empty">No cameras.</div>'; return; }
@@ -453,23 +500,25 @@ async function clipsView(camId, date) {
   const evs = (r.date ? await api(`/cameras/${cam.id}/events?date=${r.date}`) : []).map(e => ({ ...e, ms: +new Date(e.start) }));
   const clips = r.clips.map(c => ({ ...c, ms: +new Date(c.start) })).sort((x, y) => x.ms - y.ms);
   const t0 = r.date ? +new Date(r.date + 'T00:00:00') : 0; // local midnight
-  const pct = ms => (ms - t0) / 864000; // share of a 24 h day, in %
   const di = r.dates.indexOf(r.date);
+  let wlen = DAY, wstart = t0; // the part of the day the timeline shows
+  const pct = ms => (ms - wstart) / wlen * 100;
 
   view.innerHTML = `<h2>Recordings</h2>
     <div class="chips">${cams.map(c => `<button class="${c.id === cam.id ? 'on' : ''}" data-c="${c.id}">${esc(c.name)}</button>`).join('')}</div>
     <div class="player"><img id="live" alt=""><video id="lv" muted autoplay playsinline hidden></video><video id="vid" controls playsinline hidden></video><span class="badge live" id="badge">LIVE</span></div>
+    <div class="evnav" id="clipact" hidden><a class="btn" id="dl" download>Download</a><button type="button" id="prot" data-admin>Protect</button><button type="button" id="delclip" class="del" data-admin>Delete</button></div>
     ${r.dates.length ? `
     <div class="tlbar"><button type="button" id="dprev" aria-label="Previous day" ${di >= r.dates.length - 1 ? 'disabled' : ''}>‹</button>
-      <select id="date">${r.dates.map(d => `<option ${d === r.date ? 'selected' : ''}>${d}</option>`).join('')}</select>
+      <button type="button" id="datebtn" class="mono">${r.date} ▾</button>
       <button type="button" id="dnext" aria-label="Next day" ${di <= 0 ? 'disabled' : ''}>›</button></div>
-    <div class="tl" id="tl">
-      ${clips.map(c => `<i class="cv" style="left:${pct(c.ms)}%;width:${Math.max(c.duration / 864, .3)}%"></i>`).join('')}
-      ${evs.map(e => `<i class="ev" style="left:${pct(e.ms)}%;width:${Math.max((new Date(e.end) - e.ms) / 864000, .5)}%"></i>`).join('')}
-      <i class="playhead" id="head" hidden></i>
-    </div>
-    <div class="tlx"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
-    <div class="sub" style="margin-top:6px"><span class="key cv"></span>recorded <span class="key ev"></span>motion. Tap the timeline to jump.</div>
+    <div class="tl" id="tl"><div id="tlbars"></div><i class="playhead" id="head" hidden></i></div>
+    <div class="tlx" id="tlx"></div>
+    <div class="zrow"><button type="button" class="pan" id="panl" aria-label="Earlier" disabled>‹</button>
+      <div class="seg" id="zoom">${[[24, '24 h'], [6, '6 h'], [1, '1 h']].map(([h, l]) => `<button type="button" data-z="${h}" class="${h === 24 ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <button type="button" class="pan" id="panr" aria-label="Later" disabled>›</button></div>
+    <div class="sub" style="margin-top:8px"><span class="key cv"></span>recorded <span class="key ev"></span>motion. Tap the timeline to jump.</div>
+    <div class="thumbs" id="thumbs"></div>
     <div class="evnav"><button type="button" id="pe" ${evs.length ? '' : 'disabled'}>‹ Prev event</button><button type="button" id="golive">Live</button><button type="button" id="ne" ${evs.length ? '' : 'disabled'}>Next event ›</button></div>`
     : '<div class="empty">No recordings yet.</div>'}`;
   view.querySelector('.chips').onclick = e => e.target.dataset.c && (location.hash = `#/clips/${e.target.dataset.c}`);
@@ -480,39 +529,105 @@ async function clipsView(camId, date) {
   lp.start(); onLeave(lp.stop);
   if (!r.dates.length) return;
 
-  const head = $('#head'), tl = $('#tl');
-  const setHead = ms => { head.hidden = false; head.style.left = pct(ms) + '%'; badge.textContent = fmtClock(ms); };
+  const head = $('#head'), tl = $('#tl'), act = $('#clipact');
+  let headMs = null;
+  const clipName = c => c.path.split('/').pop();
+  const clampWin = s => Math.min(Math.max(s, t0), t0 + DAY - wlen);
+
+  // ----- timeline drawing -----
+  const drawTl = () => {
+    $('#tlbars').innerHTML =
+      clips.map(c => `<i class="cv${c.low ? ' low' : ''}${c.protected ? ' prot' : ''}" style="left:${pct(c.ms)}%;width:${Math.max(c.duration * 1000 / wlen * 100, .3)}%"></i>`).join('') +
+      evs.map(e => `<i class="ev" style="left:${pct(e.ms)}%;width:${Math.max((new Date(e.end) - e.ms) / wlen * 100, .5)}%"></i>`).join('');
+    $('#tlx').innerHTML = [0, 1, 2, 3, 4].map(i => { const ms = wstart + wlen * i / 4; return `<span>${ms >= t0 + DAY ? '24:00' : fmtHM(ms)}</span>`; }).join('');
+    head.hidden = headMs == null || headMs < wstart || headMs > wstart + wlen;
+    if (!head.hidden) head.style.left = pct(headMs) + '%';
+    $('#panl').disabled = wlen === DAY || wstart <= t0;
+    $('#panr').disabled = wlen === DAY || wstart + wlen >= t0 + DAY;
+    // thumbnails of motion events inside the window
+    const shown = evs.filter(e => e.clip && e.ms >= wstart && e.ms <= wstart + wlen).slice(-24);
+    $('#thumbs').innerHTML = shown.map(e => {
+      const c = clips.find(c => c.path === e.clip);
+      if (!c) return '';
+      const at = Math.max(0, Math.round((e.ms - c.ms) / 1000) + 1);
+      return `<button type="button" data-e="${evs.indexOf(e)}"><img loading="lazy" alt="" src="/api/cameras/${cam.id}/thumb?clip=${encodeURIComponent(clipName(c))}&t=${at}"><span class="mono">${fmtHM(e.ms)}</span></button>`;
+    }).join('');
+  };
+  const setHead = ms => {
+    headMs = ms; badge.textContent = fmtClock(ms);
+    if (wlen < DAY && (ms < wstart || ms > wstart + wlen)) { wstart = clampWin(ms - wlen / 2); drawTl(); }
+    else { head.hidden = false; head.style.left = pct(ms) + '%'; }
+  };
+  const setZoom = h => {
+    const centre = headMs ?? evs.at(-1)?.ms ?? (Date.now() >= t0 && Date.now() < t0 + DAY ? Date.now() : t0 + DAY / 2);
+    wlen = h * 3600e3;
+    wstart = h === 24 ? t0 : clampWin(centre - wlen / 2);
+    document.querySelectorAll('#zoom button').forEach(b => b.classList.toggle('on', +b.dataset.z === h));
+    drawTl();
+  };
+  $('#zoom').onclick = e => e.target.dataset.z && setZoom(+e.target.dataset.z);
+  $('#panl').onclick = () => { wstart = clampWin(wstart - wlen / 2); drawTl(); };
+  $('#panr').onclick = () => { wstart = clampWin(wstart + wlen / 2); drawTl(); };
+
+  // ----- clip actions -----
+  const showActions = c => {
+    act.hidden = false;
+    $('#dl').href = c.path + '?download=1';
+    $('#prot').textContent = c.protected ? 'Unprotect' : 'Protect';
+    $('#prot').hidden = !!c.low;
+    $('#delclip').hidden = !!c.protected || !!c.low;
+  };
+  $('#prot').onclick = async () => {
+    const on = !cur.protected;
+    try { await api(`/cameras/${cam.id}/clips/${clipName(cur)}/protect`, { method: 'POST', body: { protected: on } }); }
+    catch (e) { return toast(e.message); }
+    cur.protected = on; showActions(cur);
+    tl.querySelectorAll('i.cv')[clips.indexOf(cur)]?.classList.toggle('prot', on);
+    toast(on ? 'Clip protected from deletion' : 'Clip unprotected');
+  };
+  $('#delclip').onclick = () => {
+    const c = cur;
+    sheet('Delete clip', `<p>Delete the clip from <b class="mono">${fmtClock(c.ms)}</b> (${fmtBytes(c.bytes)})? It can't be undone.</p>
+      <div class="err" id="de"></div><div class="actions"><button class="pri bad" id="dgo">Delete clip</button></div>`, closeSheets);
+    $('#dgo').onclick = async () => {
+      try { await api(`/cameras/${cam.id}/clips/${clipName(c)}`, { method: 'DELETE' }); closeSheets(); toast('Clip deleted'); clipsView(cam.id, r.date); }
+      catch (e) { $('#de').textContent = e.message; }
+    };
+  };
+
+  // ----- playback -----
   const goLive = () => {
-    cur = null; vid.pause(); vid.hidden = true; head.hidden = true; lp.start();
+    cur = null; headMs = null; vid.pause(); vid.hidden = true; head.hidden = true; act.hidden = true; lp.start();
   };
   const play = (c, offset = 0) => {
-    cur = c; lp.stop(); img.hidden = true; lv.hidden = true; vid.hidden = false; badge.className = 'badge';
+    cur = c; lp.stop(); img.hidden = true; lv.hidden = true; vid.hidden = false; badge.className = 'badge'; showActions(c);
     const seek = () => { vid.currentTime = Math.max(0, offset); };
     if (vid.getAttribute('src') !== c.path) { vid.src = c.path; vid.onloadedmetadata = seek; } else seek();
     setHead(c.ms + offset * 1000);
     vid.play().catch(() => { });
   };
-  // A whole day is ~250 s per pixel on a phone, so snap a tap to the nearest clip within ~24 px.
+  // Snap a tap to the nearest clip within ~24 px of the bar; where a motion clip and the
+  // low-res track overlap, the motion clip wins.
   const playAt = ms => {
-    const tol = 24 * 86400000 / tl.getBoundingClientRect().width;
+    const tol = 24 * wlen / tl.getBoundingClientRect().width;
     let best = null, bd = Infinity;
     for (const c of clips) {
       const end = c.ms + c.duration * 1000, d = ms < c.ms ? c.ms - ms : ms > end ? ms - end : 0;
-      if (d < bd) { best = c; bd = d; }
+      if (d < bd || (d === bd && best?.low && !c.low)) { best = c; bd = d; }
     }
     if (!best || bd > tol) return toast('No recording near that time');
     play(best, bd === 0 ? (ms - best.ms) / 1000 : 0);
   };
   vid.ontimeupdate = () => cur && setHead(cur.ms + vid.currentTime * 1000);
-  vid.onended = () => { // keep going into the next clip when recording was continuous
-    const n = clips[clips.indexOf(cur) + 1];
+  vid.onended = () => { // keep going into the next clip of the same kind when recording was continuous
+    const n = clips.slice(clips.indexOf(cur) + 1).find(c => !!c.low === !!cur.low);
     if (n && n.ms - (cur.ms + cur.duration * 1000) < 15000) play(n);
   };
 
-  const msAt = e => { const b = tl.getBoundingClientRect(); return t0 + Math.min(1, Math.max(0, (e.clientX - b.left) / b.width)) * 86400000; };
+  const msAt = e => { const b = tl.getBoundingClientRect(); return wstart + Math.min(1, Math.max(0, (e.clientX - b.left) / b.width)) * wlen; };
   let drag = false;
-  tl.onpointerdown = e => { drag = true; tl.setPointerCapture(e.pointerId); setHead(msAt(e)); };
-  tl.onpointermove = e => drag && setHead(msAt(e));
+  tl.onpointerdown = e => { drag = true; tl.setPointerCapture(e.pointerId); const ms = msAt(e); headMs = ms; head.hidden = false; head.style.left = pct(ms) + '%'; badge.textContent = fmtClock(ms); };
+  tl.onpointermove = e => { if (drag) { const ms = msAt(e); headMs = ms; head.style.left = pct(ms) + '%'; badge.textContent = fmtClock(ms); } };
   tl.onpointerup = e => { if (drag) { drag = false; playAt(msAt(e)); } };
   tl.onpointercancel = () => { drag = false; };
 
@@ -522,27 +637,107 @@ async function clipsView(camId, date) {
     if (!c) return toast('Clip deleted');
     play(c, Math.max(0, (ev.ms - c.ms) / 1000 - 2));
   };
+  $('#thumbs').onclick = e => { const b = e.target.closest('[data-e]'); if (b) jump(evs[b.dataset.e]); };
   $('#ne').onclick = () => { const e = evs.find(e => e.ms > nowMs() + 1000); e ? jump(e) : toast('No later events today'); };
   $('#pe').onclick = () => { const e = [...evs].reverse().find(e => e.ms < nowMs() - 3000); e ? jump(e) : toast('No earlier events today'); };
   $('#golive').onclick = goLive;
-  $('#date').onchange = e => clipsView(cam.id, e.target.value);
+  $('#datebtn').onclick = () => calendarSheet(r.dates, r.date, d => clipsView(cam.id, d));
   $('#dprev').onclick = () => clipsView(cam.id, r.dates[di + 1]);
   $('#dnext').onclick = () => clipsView(cam.id, r.dates[di - 1]);
+  drawTl();
 }
 
 // ---------- System ----------
+const fmtAgo = s => s < 90 ? Math.round(s) + ' s' : s < 5400 ? Math.round(s / 60) + ' min' : s < 172800 ? (s / 3600).toFixed(1) + ' h' : Math.round(s / 86400) + ' d';
+const fmtStamp = d => new Date(d).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const EVENT_TEXT = { online: 'came online', offline: 'went offline', stopped: 'stopped' };
+
+function cameraLine(c) {
+  if (c.mode === 'off') return 'not recording';
+  const bits = [];
+  if (c.uptime_pct_24h != null) bits.push(`${c.uptime_pct_24h.toFixed(1)}% up (24 h)`);
+  if (c.restarts_24h) bits.push(`${c.restarts_24h} outage${c.restarts_24h > 1 ? 's' : ''}`);
+  if (c.last_data_age_s != null) bits.push(`data ${fmtAgo(c.last_data_age_s)} ago`);
+  return bits.join(', ') || 'waiting for data';
+}
+
 async function systemView() {
-  const s = await api('/system'), h = s.hw, d = s.disk, used = d.total_bytes - d.free_bytes;
+  const [s, hl] = await Promise.all([api('/system'), api('/health')]);
+  const h = s.hw, d = s.disk, used = d.total_bytes - d.free_bytes, pi = hl.pi;
+  const power = !pi.has_power ? 'not reported' : pi.throttled.length ? pi.throttled.join('; ') : 'OK';
+  const hot = pi.temp_c != null && pi.temp_c >= 80, bad = pi.has_power && pi.throttled.some(t => /right now/.test(t));
   view.innerHTML = `<h2>System</h2>
   <div class="card pad"><dl>
-    <dt>Device</dt><dd>${esc(h.model)}</dd><dt>Memory</dt><dd>${h.mem_mb} MB</dd><dt>CPU cores</dt><dd>${h.cores}</dd>
-    <dt>Video encoder</dt><dd>${esc(h.encoder.name)} ${h.encoder.hardware ? '(GPU)' : '(CPU)'}</dd>
-    <dt>Vigil memory</dt><dd>${s.vigil_mem_mb} MB</dd><dt>Version</dt><dd>${esc(s.version)}</dd></dl></div>
+    <dt>Temperature</dt><dd class="${hot ? 'bad' : ''}">${pi.temp_c == null ? 'not reported' : pi.temp_c.toFixed(1) + ' °C'}</dd>
+    <dt>Power and throttling</dt><dd class="${bad ? 'bad' : ''}">${esc(power)}</dd>
+    <dt>Memory free</dt><dd>${pi.mem_available_mb} of ${pi.mem_total_mb} MB</dd>
+    <dt>Load (1, 5, 15 min)</dt><dd>${pi.load.map(x => x.toFixed(2)).join('  ')}</dd>
+    <dt>Uptime</dt><dd>${fmtAgo(pi.uptime_s)}</dd>
+    <dt>Vigil memory</dt><dd>${s.vigil_mem_mb} MB</dd>
+  </dl></div>
+  <h2 style="margin-top:20px">Cameras</h2>
+  <div class="card">${hl.cameras.map(c => `<div class="hrow"><div><b>${esc(c.name)}</b><div class="sub mono">${esc(cameraLine(c))}</div>${c.state === 'error' && c.error ? `<div class="err">${esc(c.error)}</div>` : ''}</div>${pill({ state: c.state })}</div>`).join('') || '<div class="pad sub">No cameras.</div>'}</div>
+  <h2 style="margin-top:20px">Recent events</h2>
+  <div class="card">${hl.events.map(e => `<div class="hev"><span class="mono sub">${fmtStamp(e.time)}</span><span><b>${esc(e.camera)}</b> ${EVENT_TEXT[e.kind] || esc(e.kind)}${e.detail ? `<span class="sub"> · ${esc(e.detail)}</span>` : ''}</span></div>`).join('') || '<div class="pad sub">Nothing yet.</div>'}</div>
   <h2 style="margin-top:20px">Storage</h2>
   <div class="card pad"><div class="bar"><i style="width:${d.total_bytes ? used / d.total_bytes * 100 : 0}%"></i></div>
-    <div class="sub">${fmtBytes(used)} used of ${fmtBytes(d.total_bytes)} · ${fmtBytes(d.free_bytes)} free</div></div>
+    <div class="sub mono">${fmtBytes(used)} used of ${fmtBytes(d.total_bytes)}, ${fmtBytes(d.free_bytes)} free</div></div>
+  <h2 style="margin-top:20px">Device</h2>
+  <div class="card pad"><dl>
+    <dt>Board</dt><dd>${esc(h.model)}</dd><dt>CPU cores</dt><dd>${h.cores}</dd>
+    <dt>Video encoder</dt><dd>${esc(h.encoder.name)} (${h.encoder.hardware ? 'GPU' : 'CPU'})</dd>
+    <dt>Version</dt><dd>${esc(s.version)}</dd></dl></div>
   <h2 style="margin-top:20px">Recommended setup</h2>
   <div class="card pad"><b>${esc(h.recommendation.summary)}</b><ul>${h.recommendation.tips.map(t => `<li>${esc(t)}</li>`).join('')}</ul></div>`;
+}
+
+// ---------- Storage ----------
+async function storageView() {
+  const s = await api('/storage'), d = s.disk, m = s.mount;
+  const used = d.total_bytes - d.free_bytes, freePct = d.total_bytes ? d.free_bytes / d.total_bytes * 100 : 100;
+  const warn = [];
+  if (m.sd_card) warn.push('Recordings are on an SD card. Constant writing wears it out. Use a USB SSD.');
+  if (m.inside_container) warn.push('Recordings are inside the container, not on a mounted drive. They are lost if the container is recreated.');
+  if (freePct < s.min_free_pct + 5) warn.push(`Only ${freePct.toFixed(1)}% is free. Vigil deletes the oldest recordings when it drops below ${s.min_free_pct}%.`);
+  const days = s.per_day_bytes > 0 ? Math.floor(d.free_bytes / s.per_day_bytes) : null;
+  view.innerHTML = `<h2>Storage</h2>${warn.map(w => `<div class="warn">${esc(w)}</div>`).join('')}
+  <div class="card pad"><div class="bar"><i style="width:${d.total_bytes ? used / d.total_bytes * 100 : 0}%"></i></div>
+    <div class="sub mono">${fmtBytes(used)} used of ${fmtBytes(d.total_bytes)}, ${fmtBytes(d.free_bytes)} free</div>
+    <dl style="margin-top:12px">
+      <dt>Drive</dt><dd>${m.source ? esc(m.source) + ' (' + esc(m.fs_type) + ')' : 'unknown'}</dd>
+      <dt>Recordings</dt><dd>${fmtBytes(s.recordings_bytes)}</dd>
+      <dt>Written in 24 h</dt><dd>${fmtBytes(s.per_day_bytes)}</dd>
+      <dt>Free space lasts</dt><dd>${days == null ? 'no data yet' : days > 365 ? 'over a year' : 'about ' + days + ' day' + (days === 1 ? '' : 's')}</dd>
+    </dl></div>
+  <h2 style="margin-top:20px">Cameras</h2>
+  <div class="card">${s.cameras.map(c => `<div class="hrow"><div style="flex:1;min-width:0"><b>${esc(c.name)}</b>
+    <div class="sub mono">${c.clips} clips, ${fmtBytes(c.bytes)}${c.protected_bytes ? `, ${fmtBytes(c.protected_bytes)} protected` : ''}${c.clips ? ', since ' + new Date(c.oldest).toLocaleDateString([], { month: 'short', day: 'numeric' }) : ''}</div>
+    ${c.max_gb ? `<div class="bar"><i style="width:${Math.min(100, c.bytes / (c.max_gb * 2 ** 30) * 100)}%"></i></div><div class="sub">limit ${c.max_gb} GB</div>` : ''}</div>
+    <a class="link" href="#/camera/${c.id}">Edit</a></div>`).join('') || '<div class="pad sub">No cameras.</div>'}</div>`;
+}
+
+// ---------- Settings ----------
+async function settingsView() {
+  const st = await api('/settings');
+  const num = (id, label, small, key, min, max) => `<label for="${id}">${label} <small>${small}</small></label>
+    <input id="${id}" type="number" min="${min}" max="${max}" value="${st[key]}" inputmode="numeric">`;
+  view.innerHTML = `<h2>Settings</h2><form id="sf" class="card pad" autocomplete="off">
+    ${num('s_ret', 'Retention for new cameras', '(Days. 0 = disabled)', 'default_retention_days', 0, 3650).replace('<label', '<label style="margin-top:0"')}
+    ${num('s_free', 'Delete the oldest recordings below', '% free space', 'min_free_pct', 1, 50)}
+    ${num('s_pre', 'Motion clips start', 'seconds before the movement', 'preroll_s', 0, 30)}
+    ${num('s_post', 'Motion clips end', 'seconds after the movement', 'postroll_s', 1, 120)}
+    ${num('s_sess', 'Stay signed in for', 'days', 'session_days', 1, 365)}
+    <div class="sub" style="margin-top:16px">Time zone: <span class="mono">${esc(st.timezone)}</span>. Set it with the container's TZ variable. Recordings are cut into ${st.segment_s / 60}-minute segments. Changed motion timings apply to a camera the next time it restarts.</div>
+    <div id="sm" class="err"></div>
+    <div class="actions"><button class="pri" id="ssave">Save</button></div></form>`;
+  $('#sf').onsubmit = async e => {
+    e.preventDefault();
+    const m = $('#sm'); m.className = 'err'; m.textContent = '';
+    try {
+      await api('/settings', { method: 'PUT', body: { default_retention_days: +$('#s_ret').value, min_free_pct: +$('#s_free').value, preroll_s: +$('#s_pre').value, postroll_s: +$('#s_post').value, session_days: +$('#s_sess').value } });
+      m.className = 'ok'; m.textContent = 'Saved.';
+    } catch (err) { m.textContent = err.message; }
+  };
 }
 
 // ---------- Sign in / setup ----------
@@ -674,7 +869,7 @@ async function route() {
   const [path, query] = location.hash.slice(1).split('?');
   const [, a, b] = path.split('/');
   const q = new URLSearchParams(query || '');
-  if (me.role !== 'admin' && ['camera', 'system', 'users'].includes(a)) { location.hash = '#/'; return; }
+  if (me.role !== 'admin' && ['camera', 'system', 'users', 'storage', 'settings'].includes(a)) { location.hash = '#/'; return; }
   document.querySelectorAll('nav a').forEach(n => n.classList.toggle('on',
     n.dataset.t === (a === 'clips' ? 'clips' : a === 'system' ? 'system' : a === 'users' || a === 'account' ? '' : 'cams')));
   try {
@@ -682,6 +877,8 @@ async function route() {
     else if (a === 'clips') await clipsView(b);
     else if (a === 'live') await liveView(b);
     else if (a === 'system') await systemView();
+    else if (a === 'storage') await storageView();
+    else if (a === 'settings') await settingsView();
     else if (a === 'users') {
       await usersView();
       if (b === 'new') userSheet(null);

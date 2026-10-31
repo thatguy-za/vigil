@@ -122,3 +122,74 @@ func TestFindDevice(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestWatchMotion(t *testing.T) {
+	var srv *httptest.Server
+	pulls := 0
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, 1<<16)
+		n, _ := r.Body.Read(b)
+		body := string(b[:n])
+		env := func(inner string) {
+			fmt.Fprintf(w, `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>%s</s:Body></s:Envelope>`, inner)
+		}
+		msg := func(topic, name, val string) string {
+			return `<wsnt:NotificationMessage><wsnt:Topic>` + topic + `</wsnt:Topic><wsnt:Message><tt:Message><tt:Data><tt:SimpleItem Name="` + name + `" Value="` + val + `"/></tt:Data></tt:Message></wsnt:Message></wsnt:NotificationMessage>`
+		}
+		switch {
+		case strings.Contains(body, "GetSystemDateAndTime"):
+			env(`<GetSystemDateAndTimeResponse/>`)
+		case strings.Contains(body, "GetCapabilities"):
+			// advertise the right port on the wrong host, as a camera behind NAT would
+			env(`<GetCapabilitiesResponse><Capabilities><Events><XAddr>` + strings.Replace(srv.URL, "127.0.0.1", "192.0.2.9", 1) + `/events</XAddr></Events></Capabilities></GetCapabilitiesResponse>`)
+		case strings.Contains(body, "CreatePullPointSubscription"):
+			env(`<CreatePullPointSubscriptionResponse><SubscriptionReference><Address>` + srv.URL + `/pull</Address></SubscriptionReference></CreatePullPointSubscriptionResponse>`)
+		case strings.Contains(body, "PullMessages"):
+			pulls++
+			switch pulls {
+			case 1:
+				env(`<PullMessagesResponse>` + msg("tns1:RuleEngine/CellMotionDetector/Motion", "IsMotion", "true") + msg("tns1:VideoSource/Tamper", "IsMotion", "true") + `</PullMessagesResponse>`)
+			default:
+				env(`<PullMessagesResponse>` + msg("tns1:RuleEngine/CellMotionDetector/Motion", "IsMotion", "false") + `</PullMessagesResponse>`)
+			}
+		default: // Renew, Unsubscribe
+			env(`<ok/>`)
+		}
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	var got []bool
+	ready := false
+	err := WatchMotion(ctx, srv.URL, "admin", "x", func() { ready = true }, func(on bool) {
+		got = append(got, on)
+		if len(got) == 2 {
+			cancel()
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready || len(got) != 2 || !got[0] || got[1] {
+		t.Fatalf("ready=%v events=%v, want motion true then false (tamper ignored)", ready, got)
+	}
+}
+
+func TestMotionState(t *testing.T) {
+	cases := []struct {
+		topic, name, val string
+		state, ok        bool
+	}{
+		{"tns1:RuleEngine/CellMotionDetector/Motion", "IsMotion", "true", true, true},
+		{"tns1:VideoSource/MotionAlarm", "State", "false", false, true},
+		{"tns1:RuleEngine/TamperDetector/Tamper", "IsTamper", "true", false, false},
+		{"tns1:RuleEngine/CellMotionDetector/Motion", "Other", "true", false, false},
+	}
+	for _, c := range cases {
+		st, ok := motionState(c.topic, c.name, c.val)
+		if st != c.state || ok != c.ok {
+			t.Errorf("%+v -> %v %v", c, st, ok)
+		}
+	}
+}

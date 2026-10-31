@@ -25,6 +25,10 @@ type Camera struct {
 	RetentionDays     int    `json:"retention_days"`     // 0 = global default
 	MotionSensitivity int    `json:"motion_sensitivity"` // 1 (low) .. 10 (high)
 	MotionMask        string `json:"motion_mask"`        // 16x9 grid, row-major, 1 = ignore; "" = none
+	MaxGB             int    `json:"max_gb"`             // size limit for this camera's recordings; 0 = none
+	MotionSource      string `json:"motion_source"`      // vigil | camera | both
+	OnvifURL          string `json:"onvif_url"`          // ONVIF device service, for camera motion events
+	LowRes            bool   `json:"low_res"`            // also record the sub-stream continuously
 }
 
 const schema = `
@@ -40,7 +44,16 @@ CREATE TABLE IF NOT EXISTS cameras (
 	audio INTEGER NOT NULL DEFAULT 0,
 	retention_days INTEGER NOT NULL DEFAULT 0,
 	motion_sensitivity INTEGER NOT NULL DEFAULT 5,
-	motion_mask TEXT NOT NULL DEFAULT ''
+	motion_mask TEXT NOT NULL DEFAULT '',
+	max_gb INTEGER NOT NULL DEFAULT 0,
+	motion_source TEXT NOT NULL DEFAULT 'vigil',
+	onvif_url TEXT NOT NULL DEFAULT '',
+	low_res INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS protected_clips (
+	camera_id INTEGER NOT NULL,
+	name TEXT NOT NULL,
+	PRIMARY KEY (camera_id, name)
 );
 CREATE TABLE IF NOT EXISTS events (
 	id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,6 +77,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 	user_id INTEGER NOT NULL,
 	expires INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS health_events (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	camera_id INTEGER NOT NULL,
+	ts INTEGER NOT NULL,
+	kind TEXT NOT NULL, -- online | offline | stopped
+	detail TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS health_cam_ts ON health_events(camera_id, ts);
 CREATE TABLE IF NOT EXISTS discovered (
 	id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -90,16 +111,20 @@ func Open(dir string) (*DB, error) {
 	// databases created before motion detection lack this column
 	d.Exec(`ALTER TABLE cameras ADD COLUMN motion_sensitivity INTEGER NOT NULL DEFAULT 5`)
 	d.Exec(`ALTER TABLE cameras ADD COLUMN motion_mask TEXT NOT NULL DEFAULT ''`)
+	d.Exec(`ALTER TABLE cameras ADD COLUMN max_gb INTEGER NOT NULL DEFAULT 0`)
+	d.Exec(`ALTER TABLE cameras ADD COLUMN motion_source TEXT NOT NULL DEFAULT 'vigil'`)
+	d.Exec(`ALTER TABLE cameras ADD COLUMN onvif_url TEXT NOT NULL DEFAULT ''`)
+	d.Exec(`ALTER TABLE cameras ADD COLUMN low_res INTEGER NOT NULL DEFAULT 0`)
 	d.Exec(`ALTER TABLE discovered ADD COLUMN camera_id INTEGER NOT NULL DEFAULT 0`)
 	return &DB{d}, nil
 }
 
-const cols = `id,name,url,sub_url,mode,schedule,transcode,max_height,audio,retention_days,motion_sensitivity,motion_mask`
+const cols = `id,name,url,sub_url,mode,schedule,transcode,max_height,audio,retention_days,motion_sensitivity,motion_mask,max_gb,motion_source,onvif_url,low_res`
 
 func scan(r interface{ Scan(...any) error }) (Camera, error) {
 	var c Camera
 	err := r.Scan(&c.ID, &c.Name, &c.URL, &c.SubURL, &c.Mode, &c.Schedule,
-		&c.Transcode, &c.MaxHeight, &c.Audio, &c.RetentionDays, &c.MotionSensitivity, &c.MotionMask)
+		&c.Transcode, &c.MaxHeight, &c.Audio, &c.RetentionDays, &c.MotionSensitivity, &c.MotionMask, &c.MaxGB, &c.MotionSource, &c.OnvifURL, &c.LowRes)
 	return c, err
 }
 
@@ -125,8 +150,8 @@ func (d *DB) Camera(id int64) (Camera, error) {
 }
 
 func (d *DB) CreateCamera(c Camera) (int64, error) {
-	res, err := d.Exec(`INSERT INTO cameras (name,url,sub_url,mode,schedule,transcode,max_height,audio,retention_days,motion_sensitivity,motion_mask)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?)`, c.Name, c.URL, c.SubURL, c.Mode, c.Schedule, c.Transcode, c.MaxHeight, c.Audio, c.RetentionDays, c.MotionSensitivity, c.MotionMask)
+	res, err := d.Exec(`INSERT INTO cameras (name,url,sub_url,mode,schedule,transcode,max_height,audio,retention_days,motion_sensitivity,motion_mask,max_gb,motion_source,onvif_url,low_res)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, c.Name, c.URL, c.SubURL, c.Mode, c.Schedule, c.Transcode, c.MaxHeight, c.Audio, c.RetentionDays, c.MotionSensitivity, c.MotionMask, c.MaxGB, c.MotionSource, c.OnvifURL, c.LowRes)
 	if err != nil {
 		return 0, err
 	}
@@ -134,8 +159,8 @@ func (d *DB) CreateCamera(c Camera) (int64, error) {
 }
 
 func (d *DB) UpdateCamera(c Camera) error {
-	_, err := d.Exec(`UPDATE cameras SET name=?,url=?,sub_url=?,mode=?,schedule=?,transcode=?,max_height=?,audio=?,retention_days=?,motion_sensitivity=?,motion_mask=? WHERE id=?`,
-		c.Name, c.URL, c.SubURL, c.Mode, c.Schedule, c.Transcode, c.MaxHeight, c.Audio, c.RetentionDays, c.MotionSensitivity, c.MotionMask, c.ID)
+	_, err := d.Exec(`UPDATE cameras SET name=?,url=?,sub_url=?,mode=?,schedule=?,transcode=?,max_height=?,audio=?,retention_days=?,motion_sensitivity=?,motion_mask=?,max_gb=?,motion_source=?,onvif_url=?,low_res=? WHERE id=?`,
+		c.Name, c.URL, c.SubURL, c.Mode, c.Schedule, c.Transcode, c.MaxHeight, c.Audio, c.RetentionDays, c.MotionSensitivity, c.MotionMask, c.MaxGB, c.MotionSource, c.OnvifURL, c.LowRes, c.ID)
 	return err
 }
 
@@ -143,6 +168,8 @@ func (d *DB) DeleteCamera(id int64) error {
 	if _, err := d.Exec(`DELETE FROM events WHERE camera_id=?`, id); err != nil {
 		return err
 	}
+	d.Exec(`DELETE FROM health_events WHERE camera_id=?`, id)
+	d.Exec(`DELETE FROM protected_clips WHERE camera_id=?`, id)
 	_, err := d.Exec(`DELETE FROM cameras WHERE id=?`, id)
 	return err
 }

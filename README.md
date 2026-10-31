@@ -32,8 +32,10 @@ ONVIF cameras on the same network also show up on the home page by themselves.
 ## How it records
 
 - **Copy, don't transcode.** The camera's stream is written to 5-minute MP4 segments as it arrives, so the CPU does almost nothing. Transcoding is an option per camera: it uses the GPU encoder (`h264_v4l2m2m`) on a Pi 3B+ or 4, and the CPU on a Pi 5, which has no H.264 encoder.
-- **Motion.** Frames from the sub-stream are compared against a running background. A clip runs from 5 s before the first movement to 10 s after the last, capped at 5 minutes. You can paint zones to ignore on a 16×9 grid.
-- **Retention.** Per camera, in days (0 keeps everything). Whatever the setting, the oldest recordings are deleted if free space drops below 5%.
+- **Motion.** Either Vigil compares frames from the sub-stream against a running background, or it listens for the camera's own motion events over ONVIF (which costs the Pi almost nothing), or both. A clip runs from 5 s before the first movement to 10 s after the last, capped at 5 minutes. You can paint zones to ignore on a 16×9 grid. Optionally the sub-stream is also recorded all the time in low resolution, so there is something between motion clips.
+- **Schedule.** Each hour of the week can be off, always recording, or motion only.
+- **Retention.** Per camera, in days (0 keeps everything), plus an optional size limit per camera. Whatever the settings, the oldest recordings are deleted if free space drops below 5%. Clips you protect are never deleted automatically.
+- **Health.** If a camera goes quiet for 45 seconds Vigil restarts its recorder and logs the outage. The System page shows each camera's recent uptime, the Pi's temperature and power state, and a log of events. The Storage page shows where recordings are, how much each camera uses, and warns about SD cards.
 
 A rough guide, not a benchmark:
 
@@ -58,7 +60,7 @@ docker exec -it vigil /entrypoint.sh reset-password <username>
 ## Not done
 
 - HTTPS. Vigil serves plain HTTP, so keep it on your LAN or put it behind a VPN or an HTTPS proxy.
-- Live view is a snapshot every couple of seconds, not video.
+- Live video needs an H.264 stream. H.265 cameras and browsers that can't play it fall back to a still picture every couple of seconds.
 - No push notifications, PTZ, or per-camera permissions.
 - Auto-discovery only finds ONVIF cameras.
 

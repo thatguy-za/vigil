@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	cookieName  = "vigil_session"
-	sessionDays = 30
+	cookieName = "vigil_session"
 )
 
 var usernameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{3,32}$`)
@@ -92,7 +91,7 @@ func (s *Server) open(h http.HandlerFunc) http.HandlerFunc {
 
 func (s *Server) startSession(w http.ResponseWriter, r *http.Request, u db.User) error {
 	token, hash := auth.NewToken()
-	exp := time.Now().Add(sessionDays * 24 * time.Hour)
+	exp := time.Now().Add(time.Duration(s.DB.Int("session_days", 30)) * 24 * time.Hour)
 	if err := s.DB.CreateSession(hash, u.ID, exp); err != nil {
 		return err
 	}
