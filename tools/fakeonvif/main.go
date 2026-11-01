@@ -41,6 +41,7 @@ func main() {
 			conn.WriteToUDP([]byte(reply), from)
 		}
 	}()
+	presets := []string{"Door", "Driveway"}
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		body := string(b)
@@ -72,6 +73,21 @@ func main() {
 		switch {
 		case strings.Contains(body, "GetCapabilities") && strings.Contains(body, "<Category>Events"):
 			out(`<GetCapabilitiesResponse><Capabilities><Events><XAddr>http://127.0.0.1:8000/onvif/events</XAddr></Events></Capabilities></GetCapabilitiesResponse>`)
+		case strings.Contains(body, "GetCapabilities") && strings.Contains(body, "<Category>PTZ"):
+			out(`<GetCapabilitiesResponse><Capabilities><PTZ><XAddr>http://127.0.0.1:8000/onvif/ptz</XAddr></PTZ></Capabilities></GetCapabilitiesResponse>`)
+		case strings.Contains(body, "ContinuousMove") || strings.Contains(body, "<Stop") || strings.Contains(body, "GotoPreset"):
+			log.Printf("ptz: %s", regexp.MustCompile(`<(ContinuousMove|Stop|GotoPreset)|x="[^"]*" y="[^"]*"|<PresetToken>[^<]*`).FindAllString(body, -1))
+			out(`<ok/>`)
+		case strings.Contains(body, "SetPreset"):
+			presets = append(presets, g(`<PresetName>([^<]*)`))
+			log.Printf("ptz: saved %q", presets[len(presets)-1])
+			out(`<SetPresetResponse/>`)
+		case strings.Contains(body, "GetPresets"):
+			x := ""
+			for i, n := range presets {
+				x += fmt.Sprintf(`<Preset token="%d"><Name>%s</Name></Preset>`, i+1, n)
+			}
+			out(`<GetPresetsResponse>` + x + `</GetPresetsResponse>`)
 		case strings.Contains(body, "CreatePullPointSubscription"):
 			out(`<CreatePullPointSubscriptionResponse><SubscriptionReference><Address>http://127.0.0.1:8000/onvif/pull</Address></SubscriptionReference></CreatePullPointSubscriptionResponse>`)
 		case strings.Contains(body, "PullMessages"):
@@ -89,7 +105,7 @@ func main() {
 		case strings.Contains(body, "GetCapabilities"):
 			out(`<GetCapabilitiesResponse><Capabilities><Media><XAddr>http://127.0.0.1:8000/onvif/media</XAddr></Media></Capabilities></GetCapabilitiesResponse>`)
 		case strings.Contains(body, "GetProfiles"):
-			out(`<GetProfilesResponse><Profiles token="p1"><VideoEncoderConfiguration><Resolution><Width>1280</Width><Height>720</Height></Resolution></VideoEncoderConfiguration></Profiles></GetProfilesResponse>`)
+			out(`<GetProfilesResponse><Profiles token="p1"><PTZConfiguration token="pz"/><VideoEncoderConfiguration><Resolution><Width>1280</Width><Height>720</Height></Resolution></VideoEncoderConfiguration></Profiles></GetProfilesResponse>`)
 		case strings.Contains(body, "GetStreamUri"):
 			out(`<GetStreamUriResponse><MediaUri><Uri>` + rtsp + `</Uri></MediaUri></GetStreamUriResponse>`)
 		}

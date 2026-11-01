@@ -37,6 +37,14 @@ ONVIF cameras on the same network also show up on the home page by themselves.
 - **Retention.** Per camera, in days (0 keeps everything), plus an optional size limit per camera. Whatever the settings, the oldest recordings are deleted if free space drops below 5%. Clips you protect are never deleted automatically.
 - **Health.** If a camera goes quiet for 45 seconds Vigil restarts its recorder and logs the outage. The System page shows each camera's recent uptime, the Pi's temperature and power state, and a log of events. The Storage page shows where recordings are, how much each camera uses, and warns about SD cards.
 
+## Watching
+
+- **Live wall.** Every camera on one page. The first four play video, the rest refresh every couple of seconds (a browser only allows about six connections to one address). Tap a camera to open it.
+- **H.265.** Cameras that send H.265 play as they are in Safari and in Chrome or Edge with hardware support. Other browsers get the stream converted to H.264 on the Pi while they watch, using the GPU encoder on a Pi 3B+ or 4 and the CPU on a Pi 5. At most two streams are converted at once; any more fall back to stills.
+- **Pan, tilt and zoom.** Cameras with ONVIF PTZ show arrows, zoom and saved positions under the live picture, for admins. Hold a button to move. The camera stops when you let go, or after 4 seconds if the connection drops.
+- **Events.** A list of motion events from every camera, filtered by camera, by who saw the movement (Vigil or the camera) and by how far back to look. Tap one to play it.
+- **Export.** On the recordings page, pick a start and end time (up to 2 hours) and download the lot as one MP4. It is cut on keyframes, so it can start a second or two early.
+
 A rough guide, not a benchmark:
 
 | Board | Cameras in copy mode | Transcoded streams |
@@ -60,8 +68,9 @@ docker exec -it vigil /entrypoint.sh reset-password <username>
 ## Not done
 
 - HTTPS. Vigil serves plain HTTP, so keep it on your LAN or put it behind a VPN or an HTTPS proxy.
-- Live video needs an H.264 stream. H.265 cameras and browsers that can't play it fall back to a still picture every couple of seconds.
-- No push notifications, PTZ, or per-camera permissions.
+- Live video falls back to a still picture every couple of seconds when a browser can't play the stream and the Pi can't convert it.
+- Exports are limited to one at a time.
+- No push notifications, two-way audio, or per-camera permissions.
 - Auto-discovery only finds ONVIF cameras.
 
 ## Releases

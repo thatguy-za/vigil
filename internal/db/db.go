@@ -112,6 +112,7 @@ func Open(dir string) (*DB, error) {
 	d.Exec(`ALTER TABLE cameras ADD COLUMN motion_sensitivity INTEGER NOT NULL DEFAULT 5`)
 	d.Exec(`ALTER TABLE cameras ADD COLUMN motion_mask TEXT NOT NULL DEFAULT ''`)
 	d.Exec(`ALTER TABLE cameras ADD COLUMN max_gb INTEGER NOT NULL DEFAULT 0`)
+	d.Exec(`ALTER TABLE events ADD COLUMN source TEXT NOT NULL DEFAULT 'vigil'`)
 	d.Exec(`ALTER TABLE cameras ADD COLUMN motion_source TEXT NOT NULL DEFAULT 'vigil'`)
 	d.Exec(`ALTER TABLE cameras ADD COLUMN onvif_url TEXT NOT NULL DEFAULT ''`)
 	d.Exec(`ALTER TABLE cameras ADD COLUMN low_res INTEGER NOT NULL DEFAULT 0`)
@@ -195,18 +196,39 @@ type Event struct {
 	Peak     float64   `json:"peak"`     // largest % of the frame that changed
 	Clip     string    `json:"clip"`     // file name inside the camera folder, "" if none was saved
 	ClipDur  float64   `json:"duration"` // clip length in seconds
+	Source   string    `json:"source"`   // who saw the movement: vigil, camera or both
 }
 
 func (d *DB) AddEvent(e Event) error {
-	_, err := d.Exec(`INSERT INTO events (camera_id,start_ts,end_ts,peak,clip,clip_dur) VALUES (?,?,?,?,?,?)`,
-		e.CameraID, e.Start.Unix(), e.End.Unix(), e.Peak, e.Clip, e.ClipDur)
+	if e.Source == "" {
+		e.Source = "vigil"
+	}
+	_, err := d.Exec(`INSERT INTO events (camera_id,start_ts,end_ts,peak,clip,clip_dur,source) VALUES (?,?,?,?,?,?,?)`,
+		e.CameraID, e.Start.Unix(), e.End.Unix(), e.Peak, e.Clip, e.ClipDur, e.Source)
 	return err
 }
 
 // Events returns a camera's events that start in [from, to), oldest first.
 func (d *DB) Events(cam int64, from, to time.Time) ([]Event, error) {
-	rows, err := d.Query(`SELECT id,camera_id,start_ts,end_ts,peak,clip,clip_dur FROM events
-		WHERE camera_id=? AND start_ts>=? AND start_ts<? ORDER BY start_ts`, cam, from.Unix(), to.Unix())
+	return d.queryEvents(`WHERE camera_id=? AND start_ts>=? AND start_ts<? ORDER BY start_ts`, cam, from.Unix(), to.Unix())
+}
+
+// EventsSince returns events from every camera (or one, if cam > 0) that start at or after
+// from, newest first, up to limit. source is "" for any, or vigil, camera.
+// An event seen by both counts for either.
+func (d *DB) EventsSince(cam int64, from time.Time, source string, limit int) ([]Event, error) {
+	q, args := `WHERE start_ts>=?`, []any{from.Unix()}
+	if cam > 0 {
+		q, args = q+` AND camera_id=?`, append(args, cam)
+	}
+	if source == "vigil" || source == "camera" {
+		q, args = q+` AND source IN (?, 'both')`, append(args, source)
+	}
+	return d.queryEvents(q+` ORDER BY start_ts DESC LIMIT ?`, append(args, limit)...)
+}
+
+func (d *DB) queryEvents(where string, args ...any) ([]Event, error) {
+	rows, err := d.Query(`SELECT id,camera_id,start_ts,end_ts,peak,clip,clip_dur,source FROM events `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +237,7 @@ func (d *DB) Events(cam int64, from, to time.Time) ([]Event, error) {
 	for rows.Next() {
 		var e Event
 		var s, en int64
-		if err := rows.Scan(&e.ID, &e.CameraID, &s, &en, &e.Peak, &e.Clip, &e.ClipDur); err != nil {
+		if err := rows.Scan(&e.ID, &e.CameraID, &s, &en, &e.Peak, &e.Clip, &e.ClipDur, &e.Source); err != nil {
 			return nil, err
 		}
 		e.Start, e.End = time.Unix(s, 0), time.Unix(en, 0)

@@ -124,7 +124,8 @@ func (m *Manager) runMotion(ctx context.Context, c db.Camera, j *job, tail *tail
 			case <-tctx.Done():
 				return
 			case now := <-t.C:
-				ev.frame(vigilOn.Load() || camOn.Load(), math.Float64frombits(pctBits.Load()), now)
+				v, cm := vigilOn.Load(), camOn.Load()
+				ev.frame(v || cm, math.Float64frombits(pctBits.Load()), now, v, cm)
 			}
 		}
 	}()
@@ -220,6 +221,8 @@ type events struct {
 	start      time.Time
 	lastMotion time.Time
 	peak       float64
+	byVigil    bool // who saw movement during the current event
+	byCamera   bool
 	pre, post  time.Duration // seconds kept before the first and after the last movement
 	closing    atomic.Bool   // ffmpeg has ended: don't wait for more segments to appear
 
@@ -236,21 +239,25 @@ func (e *events) setActive(v bool) {
 
 func (e *events) begin(now time.Time, pct float64) {
 	e.active, e.start, e.peak = true, now, pct
+	e.byVigil, e.byCamera = false, false
 	e.setActive(true)
 	e.mu.Lock()
 	e.pending[e.start] = true
 	e.mu.Unlock()
 }
 
-func (e *events) frame(moving bool, pct float64, now time.Time) {
+func (e *events) frame(moving bool, pct float64, now time.Time, byVigil, byCamera bool) {
 	if moving {
 		e.consec++
 		e.lastMotion = now
+		e.byVigil = e.byVigil || byVigil
+		e.byCamera = e.byCamera || byCamera
 	} else {
 		e.consec = 0
 	}
 	if !e.active && e.consec >= startFrames {
 		e.begin(now, pct)
+		e.byVigil, e.byCamera = moving && byVigil, moving && byCamera
 	}
 	if !e.active {
 		return
@@ -266,6 +273,7 @@ func (e *events) frame(moving bool, pct float64, now time.Time) {
 		e.setActive(false)
 		if tooLong && moving {
 			e.begin(now, pct)
+			e.byVigil, e.byCamera = byVigil, byCamera
 		}
 	}
 }
@@ -283,6 +291,13 @@ func (e *events) close(now time.Time) {
 // finish assembles the clip for an event in the background and records it.
 // lastMotion is when movement was last seen; end is when the clip should stop.
 func (e *events) finish(start, lastMotion, end time.Time, peak float64) {
+	source := "vigil"
+	switch {
+	case e.byVigil && e.byCamera:
+		source = "both"
+	case e.byCamera:
+		source = "camera"
+	}
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
@@ -306,7 +321,7 @@ func (e *events) finish(start, lastMotion, end time.Time, peak float64) {
 		if lastMotion.Before(start) {
 			lastMotion = start
 		}
-		if err := e.m.db.AddEvent(db.Event{CameraID: e.c.ID, Start: start, End: lastMotion, Peak: peak, Clip: clip, ClipDur: dur}); err != nil {
+		if err := e.m.db.AddEvent(db.Event{CameraID: e.c.ID, Start: start, End: lastMotion, Peak: peak, Clip: clip, ClipDur: dur, Source: source}); err != nil {
 			log.Printf("recorder: %q save event: %v", e.c.Name, err)
 		}
 	}()

@@ -81,6 +81,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/cameras/{id}/thumb", user(s.thumb))
 	m.HandleFunc("GET /api/cameras/{id}/recordings", user(s.recordings))
 	m.HandleFunc("GET /api/cameras/{id}/events", user(s.events))
+	m.HandleFunc("GET /api/cameras/{id}/ptz", admin(s.ptzInfo))
+	m.HandleFunc("POST /api/cameras/{id}/ptz/move", admin(s.ptzMove))
+	m.HandleFunc("POST /api/cameras/{id}/ptz/stop", admin(s.ptzStop))
+	m.HandleFunc("POST /api/cameras/{id}/ptz/goto", admin(s.ptzGoto))
+	m.HandleFunc("POST /api/cameras/{id}/ptz/presets", admin(s.ptzSave))
+	m.HandleFunc("GET /api/events", user(s.feed))
+	m.HandleFunc("GET /api/cameras/{id}/export", user(s.export))
 	m.HandleFunc("GET /api/discovery", admin(s.discovered))
 	m.HandleFunc("POST /api/discovery/scan", admin(s.scan))
 	m.HandleFunc("POST /api/discovery/{id}/dismiss", admin(s.dismiss))
@@ -541,11 +548,13 @@ func (s *Server) liveVideo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	sub, err := s.Live.Subscribe(c)
+	sub, err := s.Live.Subscribe(c, r.URL.Query().Get("transcode") == "1")
 	if err != nil {
 		code := 503
 		if errors.Is(err, live.ErrUnsupported) {
 			code = 415
+		} else if errors.Is(err, live.ErrBusy) {
+			code = 429
 		}
 		fail(w, code, err.Error())
 		return

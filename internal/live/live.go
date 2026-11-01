@@ -32,11 +32,12 @@ type Hub struct {
 	feeds map[int64]*feed
 
 	smu     sync.Mutex // guards streams (see stream.go)
-	streams map[int64]*stream
+	streams map[streamKey]*stream
+	encoder string // H.264 encoder for transcoded viewing, see SetEncoder
 }
 
 func New(ctx context.Context) *Hub {
-	return &Hub{ctx: ctx, feeds: map[int64]*feed{}, streams: map[int64]*stream{}}
+	return &Hub{ctx: ctx, feeds: map[int64]*feed{}, streams: map[streamKey]*stream{}}
 }
 
 func (h *Hub) Frame(c db.Camera) ([]byte, error) {

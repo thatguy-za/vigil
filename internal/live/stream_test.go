@@ -3,6 +3,7 @@ package live
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,30 @@ func TestCodecOf(t *testing.T) {
 	}
 	if _, err := codecOf(box("moov", append([]byte("hvcC"), 1, 1, 1, 1))); err != ErrUnsupported {
 		t.Fatalf("hevc should be unsupported, got %v", err)
+	}
+}
+
+func TestCodecOfHEVC(t *testing.T) {
+	// version 1, Main profile, compat flags 0x60000000, constraint B0 00.., level 93
+	hvcc := append([]byte("hvcC"), 1, 0x01, 0x60, 0, 0, 0, 0xB0, 0, 0, 0, 0, 0, 93)
+	got, err := codecOf(box("moov", hvcc))
+	if err != nil || got != "hvc1.1.6.L93.B0" {
+		t.Fatalf("got %q %v", got, err)
+	}
+}
+
+func TestTranscodeArgs(t *testing.T) {
+	s := &stream{url: "rtsp://x", transcode: true, encoder: "h264_v4l2m2m"}
+	if a := strings.Join(s.args(), " "); !strings.Contains(a, "h264_v4l2m2m") || strings.Contains(a, "-c:v copy") {
+		t.Fatalf("hardware transcode args: %s", a)
+	}
+	s = &stream{url: "rtsp://x", transcode: true, encoder: "libx264"}
+	if a := strings.Join(s.args(), " "); !strings.Contains(a, "libx264") {
+		t.Fatalf("software transcode args: %s", a)
+	}
+	s = &stream{url: "rtsp://x"}
+	if a := strings.Join(s.args(), " "); !strings.Contains(a, "-c:v copy") {
+		t.Fatalf("copy args: %s", a)
 	}
 }
 

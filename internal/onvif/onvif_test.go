@@ -193,3 +193,64 @@ func TestMotionState(t *testing.T) {
 		}
 	}
 }
+
+func TestPTZ(t *testing.T) {
+	var srv *httptest.Server
+	var calls []string
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b := make([]byte, 1<<16)
+		n, _ := r.Body.Read(b)
+		body := string(b[:n])
+		env := func(inner string) {
+			fmt.Fprintf(w, `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body>%s</s:Body></s:Envelope>`, inner)
+		}
+		switch {
+		case strings.Contains(body, "GetSystemDateAndTime"):
+			env(`<GetSystemDateAndTimeResponse/>`)
+		case strings.Contains(body, "<Category>PTZ"):
+			env(`<GetCapabilitiesResponse><Capabilities><PTZ><XAddr>` + srv.URL + `/ptz</XAddr></PTZ></Capabilities></GetCapabilitiesResponse>`)
+		case strings.Contains(body, "GetCapabilities"):
+			env(`<GetCapabilitiesResponse><Capabilities><Media><XAddr>` + srv.URL + `/media</XAddr></Media></Capabilities></GetCapabilitiesResponse>`)
+		case strings.Contains(body, "GetProfiles"):
+			env(`<GetProfilesResponse><Profiles token="noptz"/><Profiles token="main"><PTZConfiguration token="pc1"/></Profiles></GetProfilesResponse>`)
+		case strings.Contains(body, "GetPresets"):
+			env(`<GetPresetsResponse><Preset token="1"><Name>Door</Name></Preset><Preset token="2"/></GetPresetsResponse>`)
+		default:
+			calls = append(calls, body)
+			env(`<ok/>`)
+		}
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	p, err := OpenPTZ(ctx, srv.URL, "admin", "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Move(ctx, 2, -0.5, 0); err != nil { // out-of-range speed is clamped
+		t.Fatal(err)
+	}
+	if err := p.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.GotoPreset(ctx, "1"); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := p.Presets(ctx)
+	if err != nil || len(ps) != 2 || ps[0].Name != "Door" || ps[1].Name != "Preset 2" {
+		t.Fatalf("presets %v err %v", ps, err)
+	}
+	if len(calls) != 3 || !strings.Contains(calls[0], `ProfileToken>main<`) || !strings.Contains(calls[0], `x="1.00" y="-0.50"`) ||
+		!strings.Contains(calls[1], "<Stop") || !strings.Contains(calls[2], "PresetToken>1<") {
+		t.Fatalf("unexpected requests: %q", calls)
+	}
+
+	// A camera without PTZ says so.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"><s:Body><GetCapabilitiesResponse><Capabilities/></GetCapabilitiesResponse></s:Body></s:Envelope>`)
+	}))
+	defer srv2.Close()
+	if _, err := OpenPTZ(ctx, srv2.URL, "a", "b"); err != ErrNoPTZ {
+		t.Fatalf("got %v, want ErrNoPTZ", err)
+	}
+}

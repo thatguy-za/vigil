@@ -62,6 +62,7 @@ const fmtTime = d => new Date(d).toLocaleTimeString([], { hour: '2-digit', minut
 function livePlayer(vid, img, camId, badge) {
   const MS = window.ManagedMediaSource || window.MediaSource;
   let gen = 0, ctrl = null, snapTimer = null, retry = null;
+  let convert = false; // ask the Pi to turn H.265 into H.264 (this browser can't play H.265)
   const setBadge = live => { if (badge) { badge.className = 'badge live'; badge.textContent = live ? 'LIVE' : 'STILLS'; } };
   const snap = () => {
     if (img.dataset.busy) return;
@@ -76,14 +77,17 @@ function livePlayer(vid, img, camId, badge) {
 
   async function video(myGen) {
     ctrl = new AbortController();
-    const resp = await fetch(`/api/cameras/${camId}/live.mp4`, { signal: ctrl.signal });
+    const resp = await fetch(`/api/cameras/${camId}/live.mp4${convert ? '?transcode=1' : ''}`, { signal: ctrl.signal });
     if (!resp.ok) {
       const e = new Error((await resp.json().catch(() => ({}))).error || resp.status);
       e.fatal = resp.status === 415;
       throw e;
     }
     const type = `video/mp4; codecs="${resp.headers.get('X-Codec')}"`;
-    if (!MS || !MS.isTypeSupported(type)) { const e = new Error('This browser can\'t play the stream'); e.fatal = true; throw e; }
+    if (!MS || !MS.isTypeSupported(type)) {
+      if (MS && !convert && /^hvc1/.test(resp.headers.get('X-Codec'))) { convert = true; ctrl.abort(); return video(myGen); }
+      const e = new Error('This browser can\'t play the stream'); e.fatal = true; throw e;
+    }
     const ms = new MS();
     vid.disableRemotePlayback = true;
     vid.src = URL.createObjectURL(ms);
@@ -151,7 +155,7 @@ async function camerasView() {
       <a class="btn pri" href="#/camera">Add camera</a></div>`;
     return;
   }
-  view.innerHTML = `<div class="head"><h2>Cameras</h2>${admin ? '<a class="btn" href="#/camera">Add camera</a>' : ''}</div>` + foundHtml +
+  view.innerHTML = `<div class="head"><h2>Cameras</h2>${cams.length > 1 ? '<a class="btn" href="#/wall">Live wall</a>' : ''}${admin ? '<a class="btn" href="#/camera">Add camera</a>' : ''}</div>` + foundHtml +
     `<div class="grid">${cams.map(c => `
     <div class="card cam">
       <div class="thumb"><span>no picture</span><img data-id="${c.id}" alt="">
@@ -194,7 +198,89 @@ async function liveView(id) {
   const box = view.querySelector('.player'), v = box.querySelector('video');
   const lp = livePlayer(v, box.querySelector('img'), cam.id, $('#badge'));
   lp.start(); onLeave(lp.stop);
+  if (me.role === 'admin') ptzPanel(cam.id);
   $('#fs').onclick = () => { if (!v.hidden && v.webkitEnterFullscreen) v.webkitEnterFullscreen(); else (box.requestFullscreen || box.webkitRequestFullscreen)?.call(box); };
+}
+
+// Pan, tilt and zoom controls, shown under the live picture when the camera supports them.
+// Holding a button moves the camera; letting go stops it.
+async function ptzPanel(camId) {
+  const info = await api(`/cameras/${camId}/ptz`).catch(() => null);
+  if (!info?.supported || !$('#fs')) return;
+  const box = document.createElement('div');
+  box.className = 'card pad ptz';
+  box.innerHTML = `<div class="ptzrow"><div class="dpad">
+      <button data-v="0,1,0" aria-label="Up">▲</button><button data-v="-1,0,0" aria-label="Left">◀</button><button data-v="1,0,0" aria-label="Right">▶</button><button data-v="0,-1,0" aria-label="Down">▼</button></div>
+      <div class="zoomb"><button data-v="0,0,1" aria-label="Zoom in">+</button><button data-v="0,0,-1" aria-label="Zoom out">−</button></div></div>
+    <div class="presets"><select id="pre" aria-label="Preset">${info.presets.map(p => `<option value="${esc(p.token)}">${esc(p.name)}</option>`).join('') || '<option value="">No saved positions</option>'}</select>
+      <button type="button" id="pgo" ${info.presets.length ? '' : 'disabled'}>Go</button><button type="button" id="psv">Save position…</button></div>
+    <div class="err" id="perr"></div>`;
+  view.appendChild(box);
+  // One request at a time, in order: a quick tap sends move then stop, and they must not swap.
+  let chain = Promise.resolve();
+  const send = (path, body) => chain = chain.then(() => api(`/cameras/${camId}/ptz/${path}`, { method: 'POST', body }))
+    .then(() => $('#perr') && ($('#perr').textContent = ''), e => $('#perr') && ($('#perr').textContent = e.message));
+  let held = null, again = null;
+  const SPEED = 0.5;
+  const release = () => { if (held) { clearInterval(again); held = null; send('stop', {}); } };
+  box.onpointerdown = e => {
+    const b = e.target.closest('[data-v]'); if (!b) return;
+    const [x, y, zoom] = b.dataset.v.split(',').map(n => +n * SPEED);
+    held = b; box.setPointerCapture(e.pointerId);
+    const go = () => send('move', { x, y, zoom });
+    go(); again = setInterval(go, 2000); // the camera is stopped on the server if these stop arriving
+  };
+  box.onpointerup = box.onpointercancel = release;
+  onLeave(() => { release(); box.remove(); });
+  $('#pgo').onclick = () => $('#pre').value && send('goto', { token: $('#pre').value });
+  $('#psv').onclick = () => {
+    sheet('Save position', `<p class="sub">Saves where the camera is pointing now.</p><label>Name<input id="pn" maxlength="60" autocomplete="off"></label>
+      <div class="err" id="pe2"></div><div class="actions"><button class="pri" id="pok">Save</button></div>`, closeSheets);
+    $('#pok').onclick = async () => {
+      try { await api(`/cameras/${camId}/ptz/presets`, { method: 'POST', body: { name: $('#pn').value } }); closeSheets(); toast('Position saved'); route(); }
+      catch (e) { $('#pe2').textContent = e.message; }
+    };
+  };
+}
+
+// ---------- Live wall ----------
+// Every camera at once. Browsers allow about 6 open connections per address and each live
+// video holds one, so only the first WALL_LIVE cameras play video; the rest show stills.
+const WALL_LIVE = 4;
+async function wallView() {
+  const cams = await api('/cameras');
+  if (!cams.length) { view.innerHTML = '<div class="empty">No cameras.</div>'; return; }
+  let stills = false;
+  try { stills = localStorage.getItem('wall') === 'stills'; } catch { }
+  view.innerHTML = `<div class="head"><h2>Live wall</h2><div class="seg" id="wmode"><button type="button" data-m="live" class="${stills ? '' : 'on'}">Live</button><button type="button" data-m="stills" class="${stills ? 'on' : ''}">Stills</button></div></div>
+    <div class="wall">${cams.map(c => `<div class="wtile" data-id="${c.id}"><div class="player"><img alt=""><video muted autoplay playsinline hidden></video></div>
+      <a class="cover" href="#/live/${c.id}" aria-label="Open ${esc(c.name)}"></a>
+      <div class="tl-bot"><span>${esc(c.name)}</span></div></div>`).join('')}</div>
+    <div class="sub" style="margin-top:8px">${cams.length > WALL_LIVE ? `The first ${WALL_LIVE} cameras play video, the rest refresh every 2 seconds. ` : ''}Tap a camera to open it.</div>`;
+  $('#wmode').onclick = e => {
+    if (!e.target.dataset.m) return;
+    try { localStorage.setItem('wall', e.target.dataset.m); } catch { }
+    route();
+  };
+  const tiles = [...view.querySelectorAll('.wtile')];
+  tiles.forEach((t, i) => {
+    const id = t.dataset.id, img = t.querySelector('img');
+    if (!stills && i < WALL_LIVE) {
+      const lp = livePlayer(t.querySelector('video'), img, id, null);
+      const timer = setTimeout(lp.start, i * 400);
+      onLeave(() => { clearTimeout(timer); lp.stop(); });
+      return;
+    }
+    const snap = () => {
+      if (img.dataset.busy || document.hidden) return;
+      img.dataset.busy = 1;
+      const n = new Image();
+      n.onload = () => { img.src = n.src; delete img.dataset.busy; };
+      n.onerror = () => delete img.dataset.busy;
+      n.src = `/api/cameras/${id}/snapshot?t=${Date.now()}`;
+    };
+    snap(); later(snap, 2000);
+  });
 }
 
 // ---------- Add / edit camera ----------
@@ -492,7 +578,7 @@ function calendarSheet(dates, selected, onPick) {
 }
 
 // Camera selector, then the camera view (live or playback), then a zoomable timeline.
-async function clipsView(camId, date) {
+async function clipsView(camId, date, at) {
   const cams = await api('/cameras');
   if (!cams.length) { view.innerHTML = '<div class="empty">No cameras.</div>'; return; }
   const cam = cams.find(c => c.id == camId) || cams[0];
@@ -519,7 +605,8 @@ async function clipsView(camId, date) {
       <button type="button" class="pan" id="panr" aria-label="Later" disabled>›</button></div>
     <div class="sub" style="margin-top:8px"><span class="key cv"></span>recorded <span class="key ev"></span>motion. Tap the timeline to jump.</div>
     <div class="thumbs" id="thumbs"></div>
-    <div class="evnav"><button type="button" id="pe" ${evs.length ? '' : 'disabled'}>‹ Prev event</button><button type="button" id="golive">Live</button><button type="button" id="ne" ${evs.length ? '' : 'disabled'}>Next event ›</button></div>`
+    <div class="evnav"><button type="button" id="pe" ${evs.length ? '' : 'disabled'}>‹ Prev event</button><button type="button" id="golive">Live</button><button type="button" id="ne" ${evs.length ? '' : 'disabled'}>Next event ›</button></div>
+    <div class="evnav"><button type="button" id="exp">Export a time range…</button></div>`
     : '<div class="empty">No recordings yet.</div>'}`;
   view.querySelector('.chips').onclick = e => e.target.dataset.c && (location.hash = `#/clips/${e.target.dataset.c}`);
 
@@ -641,10 +728,59 @@ async function clipsView(camId, date) {
   $('#ne').onclick = () => { const e = evs.find(e => e.ms > nowMs() + 1000); e ? jump(e) : toast('No later events today'); };
   $('#pe').onclick = () => { const e = [...evs].reverse().find(e => e.ms < nowMs() - 3000); e ? jump(e) : toast('No earlier events today'); };
   $('#golive').onclick = goLive;
+  $('#exp').onclick = () => {
+    const hm = ms => { const d = new Date(ms); return [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, '0')).join(':'); };
+    const last = clips.at(-1), end = last ? last.ms + last.duration * 1000 : t0 + 600e3; // default: the last ten minutes recorded
+    const from = Math.min(headMs ?? Math.max(t0, end - 600e3), t0 + DAY - 600e3);
+    sheet('Export a time range', `<p class="sub">Joins the recordings between two times on <b class="mono">${r.date}</b> into one MP4. Up to 2 hours.</p>
+      <label>From<input type="time" step="1" id="ef" value="${hm(from)}"></label>
+      <label>To<input type="time" step="1" id="et" value="${hm(from + 600e3)}"></label>
+      <div class="err" id="ee"></div><div class="actions"><button class="pri" id="ego">Download</button></div>`, closeSheets);
+    $('#ego').onclick = () => {
+      const at = v => { const [h, m, sec] = v.split(':').map(Number); return t0 + ((h * 60 + m) * 60 + (sec || 0)) * 1000; };
+      const a = at($('#ef').value || '00:00:00'); let b = at($('#et').value || '00:00:00');
+      if (b <= a) b += DAY;
+      if (b - a > 7200e3) return $('#ee').textContent = 'An export can cover at most 2 hours.';
+      if (!clips.some(c => !c.low && c.ms + c.duration * 1000 > a && c.ms < b)) return $('#ee').textContent = 'Nothing was recorded in that time.';
+      location.href = `/api/cameras/${cam.id}/export?from=${Math.floor(a / 1000)}&to=${Math.floor(b / 1000)}`;
+      closeSheets(); toast('Preparing your download');
+    };
+  };
   $('#datebtn').onclick = () => calendarSheet(r.dates, r.date, d => clipsView(cam.id, d));
   $('#dprev').onclick = () => clipsView(cam.id, r.dates[di + 1]);
   $('#dnext').onclick = () => clipsView(cam.id, r.dates[di - 1]);
   drawTl();
+  if (at) {
+    const c = clips.find(c => !c.low && c.ms <= at && at < c.ms + c.duration * 1000);
+    if (c) play(c, Math.max(0, (at - c.ms) / 1000 - 2));
+  }
+}
+
+// ---------- Events ----------
+const SOURCE_TEXT = { vigil: 'Vigil', camera: 'Camera', both: 'Vigil and camera' };
+const fmtDur = s => s >= 60 ? Math.floor(s / 60) + ' min ' + Math.round(s % 60) + ' s' : Math.round(s) + ' s';
+const ymd = ms => { const d = new Date(ms); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+
+// Motion events from every camera, filtered by camera, who detected it, and how far back.
+async function eventsView(q) {
+  const cams = await api('/cameras');
+  const f = { camera: q.get('camera') || '', type: q.get('type') || '', days: q.get('days') || '7' };
+  const evs = await api('/events?' + new URLSearchParams({ ...f, limit: 100 }));
+  const opt = (v, cur, label) => `<option value="${v}" ${String(v) === cur ? 'selected' : ''}>${label}</option>`;
+  view.innerHTML = `<h2>Events</h2>
+    <div class="filters">
+      <select id="fc" aria-label="Camera">${opt('', f.camera, 'All cameras')}${cams.map(c => opt(c.id, f.camera, esc(c.name))).join('')}</select>
+      <select id="ft" aria-label="Type">${opt('', f.type, 'Any motion')}${opt('vigil', f.type, 'Seen by Vigil')}${opt('camera', f.type, 'Reported by the camera')}${opt('protected', f.type, 'Protected clips')}</select>
+      <select id="fd" aria-label="Period">${opt('1', f.days, 'Last 24 hours')}${opt('7', f.days, 'Last 7 days')}${opt('30', f.days, 'Last 30 days')}${opt('90', f.days, 'Last 90 days')}</select>
+    </div>
+    <div class="card">${evs.map((e, i) => `<a class="evrow" href="#/clips/${e.camera_id}?date=${ymd(+new Date(e.start))}&at=${+new Date(e.start)}">
+        ${e.clip_name ? `<img loading="lazy" alt="" src="/api/cameras/${e.camera_id}/thumb?clip=${encodeURIComponent(e.clip_name)}&t=5">` : '<span class="noimg"></span>'}
+        <span><b>${esc(e.camera)}</b>${e.protected ? ' <span class="tag">Protected</span>' : ''}
+          <span class="sub mono">${fmtStamp(e.start)}${e.duration ? ', ' + fmtDur(e.duration) : ''}</span>
+          <span class="sub">${SOURCE_TEXT[e.source] || esc(e.source)}${e.clip ? '' : ', clip deleted'}</span></span></a>`).join('') || '<div class="pad sub">No events match.</div>'}</div>
+    ${evs.length >= 100 ? '<div class="sub" style="margin-top:8px">Showing the newest 100.</div>' : ''}`;
+  const go = () => { const p = new URLSearchParams(); for (const [k, id] of [['camera', 'fc'], ['type', 'ft'], ['days', 'fd']]) if ($('#' + id).value) p.set(k, $('#' + id).value); location.hash = '#/events?' + p; };
+  ['fc', 'ft', 'fd'].forEach(id => $('#' + id).onchange = go);
 }
 
 // ---------- System ----------
@@ -871,11 +1007,13 @@ async function route() {
   const q = new URLSearchParams(query || '');
   if (me.role !== 'admin' && ['camera', 'system', 'users', 'storage', 'settings'].includes(a)) { location.hash = '#/'; return; }
   document.querySelectorAll('nav a').forEach(n => n.classList.toggle('on',
-    n.dataset.t === (a === 'clips' ? 'clips' : a === 'system' ? 'system' : a === 'users' || a === 'account' ? '' : 'cams')));
+    n.dataset.t === (a === 'clips' || a === 'events' ? 'clips' : a === 'system' ? 'system' : a === 'users' || a === 'account' ? '' : 'cams')));
   try {
     if (a === 'camera') { await camerasView(); await cameraForm(b, q.get('d')); }
-    else if (a === 'clips') await clipsView(b);
+    else if (a === 'clips') await clipsView(b, q.get('date'), +q.get('at') || 0);
+    else if (a === 'events') await eventsView(q);
     else if (a === 'live') await liveView(b);
+    else if (a === 'wall') await wallView();
     else if (a === 'system') await systemView();
     else if (a === 'storage') await storageView();
     else if (a === 'settings') await settingsView();

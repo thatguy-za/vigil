@@ -57,11 +57,13 @@ func main() {
 	rec := recorder.New(d, recDir, bufDir, info.Encoder, info.HWDecode)
 	go rec.Run(ctx)
 	go storage.Run(ctx, d, recDir)
+	liveHub := live.New(ctx)
+	liveHub.SetEncoder(info.Encoder.Name)
 	scanner := &discover.Scanner{DB: d}
 	go scanner.Run(ctx)
 
 	srv := &http.Server{Addr: ":" + env("VIGIL_PORT", "8080"), ReadHeaderTimeout: 10 * time.Second,
-		Handler: (&api.Server{DB: d, Rec: rec, Live: live.New(ctx), Scan: scanner, HW: info, RecDir: recDir, Version: version}).Handler()}
+		Handler: (&api.Server{DB: d, Rec: rec, Live: liveHub, Scan: scanner, HW: info, RecDir: recDir, Version: version}).Handler()}
 	go func() {
 		<-ctx.Done()
 		c, cancel := context.WithTimeout(context.Background(), 20*time.Second)
